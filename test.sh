@@ -7,6 +7,7 @@ run() {
   python3 -m pyflakes feetbrowser tests
   python3 tests/test_units.py
   python3 tests/test_nav.py
+  python3 tests/test_toes.py
   python3 tests/smoke.py
 }
 
