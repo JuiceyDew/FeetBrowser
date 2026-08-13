@@ -306,11 +306,19 @@ class Browser:
 
     # -- tab management --------------------------------------------------
 
+    def chrome_bands(self):
+        """Chrome bands declared by toes, as [(id, height, y), ...]."""
+        return toes.compute_bands(self.toe_contexts)
+
+    def chrome_height(self):
+        """Total chrome height: the fixed chrome plus any toe bands."""
+        return CHROME_HEIGHT + toes.band_height(self.chrome_bands())
+
     def tab_height(self):
         h = self.canvas.winfo_height()
         if h <= 1:  # window not mapped yet
             h = HEIGHT
-        return max(50, h - CHROME_HEIGHT)
+        return max(50, h - self.chrome_height())
 
     def new_tab(self, url):
         tab = Tab(self.tab_height(), self)
@@ -379,19 +387,26 @@ class Browser:
 
     def _on_click(self, e):
         self.focus = None
-        if e.y < CHROME_HEIGHT:
+        if e.y < self.chrome_height():
             self._chrome_click(e.x, e.y)
         else:
             if not self.active_tab:
                 return
-            dest = self.active_tab.click(e.x, e.y - CHROME_HEIGHT)
+            dest = self.active_tab.click(e.x, e.y - self.chrome_height())
             if dest:
                 self.active_tab.load(dest)
             self.draw()
 
     def _chrome_click(self, x, y):
+        # Toe chrome bands (above the tabs).
+        bands = self.chrome_bands()
+        band_h = toes.band_height(bands)
+        if band_h and y < band_h:
+            if toes.dispatch(self.toe_contexts, "on_chrome_click",
+                             x, y, bands):
+                return
         # Tab bar (top 40px).
-        if y < 40:
+        if y < band_h + 40:
             # New-tab button.
             if x < 34:
                 self.new_tab("about:blank")
@@ -409,19 +424,19 @@ class Browser:
                     return
             return
         # Toolbar (40..80).
-        if 8 <= x < 34 and 48 <= y < 72:
+        if 8 <= x < 34 and band_h + 48 <= y < band_h + 72:
             self._back()
             return
-        if 40 <= x < 66 and 48 <= y < 72:
+        if 40 <= x < 66 and band_h + 48 <= y < band_h + 72:
             self._forward()
             return
-        if 72 <= x < 98 and 48 <= y < 72:
+        if 72 <= x < 98 and band_h + 48 <= y < band_h + 72:
             self._reload()
             return
         # Toe toolbar buttons.
         bx = 104
         for btn in self._toe_buttons():
-            if bx <= x < bx + 26 and 48 <= y < 72:
+            if bx <= x < bx + 26 and band_h + 48 <= y < band_h + 72:
                 ctx = self.toe_handlers.get(btn.id)
                 if ctx:
                     ctx.call("on_click", btn.id)
@@ -439,8 +454,8 @@ class Browser:
     def _on_motion(self, e):
         if not self.active_tab:
             return
-        if e.y >= CHROME_HEIGHT:
-            doc_x, doc_y = e.x, e.y - CHROME_HEIGHT
+        if e.y >= self.chrome_height():
+            doc_x, doc_y = e.x, e.y - self.chrome_height()
             toes.dispatch(self.toe_contexts, "on_motion", doc_x, doc_y)
             href = self.active_tab.link_at(doc_x, doc_y)
             self.canvas.config(cursor="hand2" if href else "")
@@ -517,11 +532,18 @@ class Browser:
         self.canvas.delete("all")
         if self.active_tab:
             self.active_tab.tab_height = self.tab_height()
-            self.active_tab.draw(self.canvas, CHROME_HEIGHT)
-        toes.dispatch(self.toe_contexts, "on_draw", self.canvas, CHROME_HEIGHT)
+            self.active_tab.draw(self.canvas, self.chrome_height())
+        toes.dispatch(self.toe_contexts, "on_draw", self.canvas,
+                      self.chrome_height())
         # Chrome background covers page content that scrolled up under it.
         self.canvas.create_rectangle(0, 0, self.canvas.winfo_width(),
-                                     CHROME_HEIGHT, fill="#e8e8e8", width=0)
+                                     self.chrome_height(), fill="#e8e8e8",
+                                     width=0)
+        # Toe chrome bands paint on top of the chrome background.
+        bands = self.chrome_bands()
+        if bands:
+            toes.dispatch(self.toe_contexts, "on_chrome_draw",
+                          self.canvas, bands)
         self._draw_tabs()
         self._draw_toolbar()
         self._draw_toe_buttons()
@@ -619,7 +641,7 @@ class Browser:
             return
         c = self.canvas
         track_x = c.winfo_width() - 10
-        track_top = CHROME_HEIGHT
+        track_top = self.chrome_height()
         track_h = view
         frac = view / total
         thumb_h = max(30, track_h * frac)
@@ -650,6 +672,103 @@ class _AboutURL:
         return "about:blank"
 
 
+class PopupWindow:
+    """A real popup window (a separate Tk Toplevel), not a redirect.
+
+    Each popup is a mini-browser: its own canvas, a hand-drawn title bar
+    with a close button, a Tab rendering the URL through the full pipeline,
+    wheel scrolling, and a scrollbar. Popups share the browser's toe
+    contexts, so toe:// pages, the detective's paper trail, and link
+    navigation all work inside them.
+
+    Special links a page can use:
+        popup:close            close this popup
+        popup:spawn:<url>      open another popup (the classic adware chain)
+    """
+
+    TITLE_BAR = 22
+
+    def __init__(self, browser, url, width=320, height=240):
+        self.browser = browser
+        self.width = width
+        self.height = height
+        self.window = tkinter.Toplevel(browser.window)
+        self.window.title("")
+        self.window.geometry(f"{width}x{height}")
+        self.canvas = tkinter.Canvas(
+            self.window, width=width, height=height,
+            bg="white", highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
+        self.tab = Tab(height - self.TITLE_BAR, browser)
+        self.tab.load(URL(str(url)) if isinstance(url, str) else url)
+        self._bind()
+        self.draw()
+
+    def _bind(self):
+        self.window.bind("<MouseWheel>", self._on_wheel)
+        self.window.bind("<Button-4>", lambda e: self._scroll(-SCROLL_STEP))
+        self.window.bind("<Button-5>", lambda e: self._scroll(SCROLL_STEP))
+        self.window.bind("<Button-1>", self._on_click)
+
+    def _on_wheel(self, e):
+        self._scroll(-e.delta if abs(e.delta) < 30
+                     else -int(e.delta / 30) * SCROLL_STEP)
+
+    def _scroll(self, delta):
+        self.tab.scroll_by(delta)
+        self.draw()
+
+    def _on_click(self, e):
+        if e.y < self.TITLE_BAR:
+            if e.x >= self.width - 20:
+                self.window.destroy()
+            return
+        dest = self.tab.click(e.x, e.y - self.TITLE_BAR)
+        if dest:
+            self._navigate(dest)
+        self.draw()
+
+    def _navigate(self, url):
+        s = str(url)
+        if s == "popup:close":
+            self.window.destroy()
+            return
+        if s.startswith("popup:spawn:"):
+            for ctx in self.browser.toe_contexts:
+                if hasattr(ctx, "popup"):
+                    ctx.popup(s[len("popup:spawn:"):])
+            return
+        self.tab.load(url)
+        self.draw()
+
+    def draw(self):
+        c = self.canvas
+        c.delete("all")
+        self.tab.tab_height = self.height - self.TITLE_BAR
+        self.tab.draw(c, self.TITLE_BAR)
+        c.create_rectangle(0, 0, self.width, self.TITLE_BAR,
+                           fill="#d0d0d0", width=0)
+        c.create_line(0, self.TITLE_BAR, self.width, self.TITLE_BAR,
+                      fill="#999")
+        c.create_text(6, self.TITLE_BAR // 2, text=str(self.tab.url)[:40],
+                      anchor="w", font=get_font(10, "normal", "roman",
+                                                "Helvetica"), fill="#333")
+        c.create_text(self.width - 10, self.TITLE_BAR // 2, text="×",
+                      font=get_font(12, "bold", "roman", "Helvetica"),
+                      fill="#333")
+        # Scrollbar.
+        view = self.height - self.TITLE_BAR
+        total = self.tab.content_height()
+        if total > view:
+            frac = view / total
+            thumb_h = max(20, view * frac)
+            thumb_top = self.TITLE_BAR + (view - thumb_h) * (
+                self.tab.scroll / (total - view))
+            c.create_rectangle(self.width - 6, thumb_top,
+                               self.width - 2, thumb_top + thumb_h,
+                               fill="#9aa0a6", width=0)
+
+
 WELCOME_HTML = """
 <!doctype html>
 <html><head><title>New Tab</title>
@@ -673,6 +792,12 @@ WELCOME_HTML = """
     <li><a href="https://news.ycombinator.com">Hacker News</a></li>
     <li><a href="https://en.wikipedia.org/wiki/Web_browser">Wikipedia: Web browser</a></li>
     <li><a href="view-source:https://example.com">view-source:example.com</a></li>
+  </ul>
+  <h3>Your toes</h3>
+  <ul>
+    <li><a href="toe://toebar">toe://toebar</a> — the Toe Bar settings</li>
+    <li><a href="toe://gallery">toe://gallery</a> — every installed toe</li>
+    <li><a href="toe://sock">toe://sock</a> — the Sock Detective's case file</li>
   </ul>
   <h3>Shortcuts</h3>
   <ul>

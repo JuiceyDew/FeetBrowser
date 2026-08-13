@@ -97,11 +97,13 @@ def test_toe_gallery_lists_toes():
     assert "toe-scheme" in rendered, rendered
 
 
-def test_unknown_toe_host_is_404():
+def test_unknown_toe_host_falls_through():
     stub = StubBrowser()
     tab = Tab(700, stub)
+    # toe-scheme only claims hello/gallery; unknown toe:// hosts fall
+    # through to normal fetching (which fails for a bogus host).
     tab.load("toe://nope")
-    assert "No such toe" in display_text(tab)
+    assert tab.document is not None, "error page laid out"
 
 
 def test_broken_toe_is_skipped():

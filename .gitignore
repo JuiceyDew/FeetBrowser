@@ -5,3 +5,6 @@ __pycache__/
 
 # local session helper
 session
+
+# per-toe persisted settings
+toes/*/settings.json

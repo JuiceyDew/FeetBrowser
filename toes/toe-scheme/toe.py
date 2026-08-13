@@ -24,7 +24,8 @@ def handle(url, tab):
             f"— {toe.description or 'no description'}</li>"
             for toe in toes)
         return {}, _gallery(rows), "text/html"
-    return {}, _missing(url.host), "text/html"
+    # Only claim hosts this toe owns; other toes may handle toe:// hosts.
+    return None
 
 
 def _hello():
@@ -61,19 +62,8 @@ def _gallery(rows):
   <ul>
     {rows}
   </ul>
-  <p><a href="toe://hello">toe://hello</a></p>
-</body></html>
-"""
-
-
-def _missing(host):
-    return f"""
-<!doctype html>
-<html><head><title>toe://{host}</title>
-<style>body {{ font-family: Helvetica; margin: 60px; color: #222; }}</style>
-</head>
-<body>
-  <h1>No such toe</h1>
-  <p>toe://{host} isn't a toe we're gripping. Try <a href="toe://gallery">toe://gallery</a>.</p>
+  <p><a href="toe://hello">toe://hello</a> ·
+     <a href="toe://toebar">the Toe Bar</a> ·
+     <a href="toe://sock">the Sock Detective</a></p>
 </body></html>
 """

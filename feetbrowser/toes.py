@@ -87,12 +87,29 @@ class Context:
 
         on_new_tab()                -> None
             A new tab was created.
+
+        chrome_bands()              -> [(id, height), ...]
+            Declare horizontal bands this toe wants drawn in the browser
+            chrome, stacked above the tabs. Each band is a (unique id,
+            height-in-px) tuple. The browser grows its chrome to fit every
+            toe's bands.
+
+        on_chrome_draw(canvas, bands) -> None
+            Paint the toe's chrome bands. `bands` is the list of
+            (id, height, y_offset) tuples for the current frame, in draw
+            order. Called after the chrome background, before the tabs.
+
+        on_chrome_click(x, y, bands) -> bool
+            A click landed inside the chrome band region. `bands` is the
+            same list as on_chrome_draw. Return True if the click was
+            consumed, False to let the normal chrome handle it.
     """
 
     def __init__(self, browser, toe):
         self.browser = browser
         self.toe = toe
         self._callbacks = {}
+        self._settings = None
         if hasattr(toe, "activate"):
             toe.activate(self)
 
@@ -114,6 +131,51 @@ class Context:
         tab = self.browser.active_tab
         if tab:
             tab.load(URL(str(url)) if isinstance(url, str) else url)
+
+    def popup(self, url, width=320, height=240):
+        """Open a real popup window rendering `url` through the pipeline.
+
+        Popups are separate Tk windows (not redirects) with their own
+        canvas, a hand-drawn title bar, scrolling, and a scrollbar. They
+        share the browser's toe contexts, so toe:// pages, the detective's
+        paper trail, and link navigation all work inside them.
+        """
+        from .browser import PopupWindow
+        return PopupWindow(self.browser, url, width, height)
+
+    # -- per-toe settings -------------------------------------------------
+
+    @property
+    def settings(self):
+        """A dict of this toe's persisted settings (loaded lazily)."""
+        if self._settings is None:
+            self._settings = self._load_settings()
+        return self._settings
+
+    def save_settings(self):
+        """Persist the current settings dict to toes/<name>/settings.json."""
+        path = self._settings_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                json.dump(self._settings, f, indent=2)
+        except OSError as e:
+            sys.stderr.write(
+                f"toe {self.toe_name()}: could not save settings: {e}\n")
+
+    def _settings_path(self):
+        folder = getattr(self.toe, "folder", None)
+        if not folder:
+            return os.path.join(repo_root(), TOES_DIR, "settings.json")
+        return os.path.join(folder, "settings.json")
+
+    def _load_settings(self):
+        path = self._settings_path()
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
 
     # -- hook registration ------------------------------------------------
 
@@ -233,3 +295,83 @@ def extra_css(ctxs, url):
         if r:
             sheets.append(r)
     return "\n".join(sheets) if sheets else None
+
+
+def compute_bands(ctxs):
+    """Collect every toe's chrome bands as [(id, height, y_offset), ...].
+
+    Bands are stacked above the tabs in declaration order; each entry's
+    y_offset is the top of its strip in canvas coordinates.
+    """
+    bands = []
+    y = 0
+    for c in ctxs:
+        declared = c.call("chrome_bands") or []
+        for band_id, height in declared:
+            bands.append((band_id, height, y))
+            y += height
+    return bands
+
+
+def band_height(bands):
+    """Total height consumed by chrome bands."""
+    return sum(h for _id, h, _y in bands)
+
+
+# -- CLI helpers ----------------------------------------------------------
+
+
+def list_toes():
+    """Print a table of installed toes and their load status."""
+    found = discover_toes()
+    if not found:
+        print("No toes installed. Drop a folder with toe.json into toes/.")
+        return
+    width = max(len(t.name) for t in found)
+    for t in found:
+        print(f"{t.name:<{width}}  v{t.version}  {t.description}")
+
+
+def new_toe(name):
+    """Scaffold a new toe folder with a manifest and an entry stub."""
+    import re
+    safe = re.sub(r"[^a-z0-9-]", "-", name.lower()).strip("-")
+    if not safe:
+        print("error: toe name must contain letters or digits")
+        return 1
+    folder = os.path.join(repo_root(), TOES_DIR, safe)
+    if os.path.exists(folder):
+        print(f"error: {folder} already exists")
+        return 1
+    os.makedirs(folder)
+    manifest = {
+        "name": safe,
+        "version": "0.1.0",
+        "description": "A brand new toe.",
+        "entry": "toe.py",
+    }
+    with open(os.path.join(folder, "toe.json"), "w") as f:
+        json.dump(manifest, f, indent=2)
+        f.write("\n")
+    with open(os.path.join(folder, "toe.py"), "w") as f:
+        f.write('"""%s toe."""\n\n\n'
+                'def activate(ctx):\n'
+                '    # ctx.on("on_load", on_load)\n'
+                '    pass\n' % safe)
+    print(f"created {folder}")
+    return 0
+
+
+def toe_docs():
+    """Print a markdown reference generated from every toe's manifest."""
+    found = discover_toes()
+    if not found:
+        print("No toes installed.")
+        return
+    print("# Toe reference\n")
+    for t in found:
+        print(f"## {t.name} v{t.version}\n")
+        print(f"{t.description or 'No description.'}\n")
+        doc = getattr(t.module, "__doc__", "") or ""
+        if doc.strip():
+            print("```\n" + doc.strip() + "\n```\n")

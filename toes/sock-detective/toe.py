@@ -323,6 +323,9 @@ bar. Esc exits.</div>
 <div class="box"><b>Why "sock"?</b> The page is the sock. The detective
 pulls it on, looks at the seams, and tells you exactly what's holding your
 feet together.</div>
+<div class="box"><b>Also on the case</b>: the <a href="toe://toebar">Toe
+Bar</a> (a 2003 toolbar that clutters your screen) and the
+<a href="toe://gallery">toe gallery</a>.</div>
 """
 
 

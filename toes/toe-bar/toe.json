@@ -1,0 +1,6 @@
+{
+  "name": "toe-bar",
+  "version": "0.1.0",
+  "description": "A wide, cluttered, early-2000s toolbar. Marquee, banner ads, popups, a hit counter, and a web ring. Best viewed in 800x600.",
+  "entry": "toe.py"
+}

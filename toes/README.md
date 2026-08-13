@@ -44,9 +44,14 @@ last one wins.
 | `on_keypress(event)` | a key is pressed (no address-bar focus) | `True` to swallow the key |
 | `on_motion(x, y)` | the mouse moved over the page (document coords) | — |
 | `on_new_tab()` | a new tab is created | — |
+| `chrome_bands()` | declare chrome bands above the tabs | `[(id, height), ...]` |
+| `on_chrome_draw(canvas, bands)` | paint the toe's chrome bands | — |
+| `on_chrome_click(x, y, bands)` | a click landed in the band region | `True` to consume |
 
 Helpers on the context: `ctx.current_tab()`, `ctx.tabs()`, `ctx.set_status(msg)`,
-`ctx.open(url)`.
+`ctx.open(url)`, `ctx.popup(url, width, height)` (a real popup window, not a
+redirect), and `ctx.settings` / `ctx.save_settings()` (per-toe persisted
+settings in `toes/<name>/settings.json`).
 
 ## Writing pages from a toe
 
@@ -67,3 +72,15 @@ See `toes/toe-scheme/toe.py` for a complete example.
   `/style`, `/cases`, `/errors`, `/help`) are full case files on the page's
   guts, all rendered through the normal pipeline (demonstrates `on_draw`,
   `on_motion`, `on_click`, `on_keypress`, `handle`).
+- **toe-bar** — a wide, cluttered, early-2000s toolbar drawn as a chrome
+  band above the tabs: a scrolling marquee, rotating banner ads, a hit
+  counter, a web ring, and popup windows (real popups, not redirects).
+  `toe://toebar` is its settings page; `toe://ad/<n>` are the ad landing
+  pages (demonstrates `chrome_bands`, `on_chrome_draw`, `on_chrome_click`,
+  `ctx.popup`, `ctx.settings`).
+
+## CLI
+
+`python3 -m feetbrowser --toes` lists installed toes, `--new-toe <name>`
+scaffolds a new toe folder, and `--toe-docs` prints a markdown reference
+generated from every toe's manifest and docstring.

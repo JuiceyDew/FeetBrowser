@@ -9,6 +9,7 @@ run() {
   python3 tests/test_nav.py
   python3 tests/test_toes.py
   python3 tests/test_sock.py
+  python3 tests/test_toebar.py
   python3 tests/smoke.py
 }
 
