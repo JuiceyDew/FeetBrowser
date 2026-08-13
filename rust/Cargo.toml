@@ -1,0 +1,33 @@
+[package]
+name = "feetbrowser-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["FeetBrowser Core Team"]
+description = "High-performance core primitives for FeetBrowser, written in Rust."
+license = "MIT"
+
+[lib]
+name = "feetbrowser_core"
+crate-type = ["cdylib"]
+
+# Core runtime. Not currently used by the hot path, but required for the
+# async rewrite planned in Phase 2 (see CONTRIBUTING.md).
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
+itertools = "0.13"
+rayon = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
