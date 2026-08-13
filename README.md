@@ -18,6 +18,10 @@ wrap Chromium, WebKit, Gecko, or any HTTP library — it implements its own:
 - **Browser UI** — a hand-drawn chrome on a Tk canvas: tabs, an address bar
   with search fallback, back / forward / reload, hover + clickable links,
   scrolling, a scrollbar, and a status bar.
+- **Extensions (Toes)** — a from-scratch hooking system. A toe is a plain
+  Python module dropped into `toes/` that can rewrite pages, inject CSS,
+  take over navigations (custom schemes like `toe://`), and draw on the
+  canvas. See `toes/README.md`.
 
 Tk is used **only as the pixel surface** (a canvas to draw text and rectangles
 on) and for font metrics — the browser engine itself is all in this repo.
@@ -55,10 +59,15 @@ feetbrowser/
   cssparser.py   CSS parser, selectors, specificity, cascade
   layout.py      block/inline layout -> display list, painting
   browser.py     Tk window, chrome, tabs, history, event loop
+  toes.py        extension hooking (Toes): discovery + dispatch
   ua.css         default user-agent stylesheet
+toes/
+  word-count/    sample toe: page word count (on_load + extra_css)
+  toe-scheme/    sample toe: the toe:// scheme (handle)
 tests/
   test_units.py  offline unit tests (URL, HTML, CSS, internal pages)
   test_nav.py    click-to-navigate, history, view-source
+  test_toes.py   toe engine + sample toe tests
   smoke.py       end-to-end pipeline on real pages
 ```
 
@@ -66,7 +75,8 @@ tests/
 
 **Does:** fetch and render real websites over HTTPS, apply their CSS
 (text styling, colors, backgrounds, layout), follow links, keep per-tab
-history, show page source.
+history, show page source, and run extensions ("toes") that can rewrite
+pages, inject CSS, and register custom schemes.
 
 **Doesn't (yet):** run JavaScript, decode images (drawn as placeholders),
 float/flex/grid/table layout, or form submission wiring. These are the
