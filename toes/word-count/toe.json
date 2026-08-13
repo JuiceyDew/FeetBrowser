@@ -1,0 +1,6 @@
+{
+  "name": "word-count",
+  "version": "0.1.0",
+  "description": "Counts the words on every page and adds a little status line.",
+  "entry": "toe.py"
+}

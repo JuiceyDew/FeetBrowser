@@ -1,0 +1,6 @@
+{
+  "name": "toe-scheme",
+  "version": "0.1.0",
+  "description": "Registers the toe:// scheme. toe://hello says hi; toe://gallery lists every installed toe.",
+  "entry": "toe.py"
+}
