@@ -3,6 +3,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# The host validation core is a Rust cdylib loaded at import time.
+(cd rust && cargo build --release)
+
 if python3 -c "import tkinter" 2>/dev/null; then
   exec python3 -m feetbrowser "$@"
 elif command -v nix-shell >/dev/null 2>&1; then

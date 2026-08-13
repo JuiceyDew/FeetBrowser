@@ -429,9 +429,9 @@ class Browser:
         if self.focus == "address" and self.address_text.strip():
             self.focus = None
             query = self.address_text.strip()
+            # Address-bar search moved to the Pro tier.
             if not self._looks_like_url(query):
-                query = "https://duckduckgo.com/html/?q=" + \
-                    query.replace(" ", "+")
+                query = "https://" + query.replace(" ", "")
             elif "://" not in query and not query.startswith(
                     ("file:", "data:", "view-source:", "about:")):
                 query = "https://" + query
@@ -604,17 +604,20 @@ WELCOME_HTML = """
   a { color: #1a73e8; }
 </style></head>
 <body>
-  <h1>🦶 FeetBrowser</h1>
+  <h1>🦀 FeetBrowser</h1>
   <p class="sub">A web browser built from scratch — its own HTTP client,
-  HTML parser, CSS engine, and layout engine.</p>
+  HTML parser, CSS engine, and layout engine, with a Rust-accelerated
+  entitlement core.</p>
   <h3>Try these</h3>
   <ul>
     <li><a href="https://example.com">example.com</a> — the classic test page</li>
     <li><a href="https://info.cern.ch/hypertext/WWW/TheProject.html">the first web page ever</a></li>
     <li><a href="https://news.ycombinator.com">Hacker News</a></li>
     <li><a href="https://en.wikipedia.org/wiki/Web_browser">Wikipedia: Web browser</a></li>
-    <li><a href="view-source:https://example.com">view-source:example.com</a></li>
   </ul>
+  <h3>FeetBrowser Pro</h3>
+  <p class="sub">Page rendering requires an active subscription. Your Free
+  plan includes 0 page views per month.</p>
   <h3>Shortcuts</h3>
   <ul>
     <li><b>Ctrl-L</b> focus address bar &nbsp; <b>Ctrl-T</b> new tab &nbsp;
