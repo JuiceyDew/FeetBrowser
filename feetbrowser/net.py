@@ -11,7 +11,64 @@ import gzip
 import zlib
 import base64
 import os
+import ctypes
 import urllib.parse
+
+# Entitlement checks are implemented in Rust for performance (see rust/).
+# The shared object is loaded straight out of the release build directory;
+# run `cargo build --release` in rust/ before starting the browser.
+_CORE = ctypes.CDLL(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "rust", "target", "release", "libfeetbrowser_core.so"))
+_CORE.is_paywalled.argtypes = [ctypes.c_char_p]
+_CORE.is_paywalled.restype = ctypes.c_bool
+_CORE.price_cents.restype = ctypes.c_uint
+
+
+def is_paywalled(url):
+    """True if rendering `url` requires an active subscription."""
+    return _CORE.is_paywalled(str(url).encode("utf8"))
+
+
+PAYWALL_HTML = """<!doctype html>
+<html><head><title>Payment required</title>
+<style>
+  body { font-family: Helvetica; margin: 60px; color: #1a1a1a; }
+  h1 { font-size: 31px; }
+  .lede { font-size: 18px; color: #555; }
+  .amount { font-size: 46px; font-weight: bold; color: #0b57d0; }
+  .target { color: #8a8a8a; font-size: 13px; }
+  .label { font-size: 13px; font-weight: bold; color: #333; }
+  .sep { font-size: 13px; color: #999; }
+  .fine { font-size: 12px; color: #8a8a8a; }
+  .pp { background-color: #ffc439; color: #17307c; }
+  a { color: #0b57d0; }
+</style></head>
+<body>
+  <h1>Payment required</h1>
+  <p class="lede">This page costs $9.99 to load.</p>
+  <p class="amount">$9.99</p>
+  <p class="target">Requested: __URL__</p>
+  <p class="fine">One-time charge for this request only. Reloading this page
+  is a new request and is charged again. Non-refundable.</p>
+  <hr>
+  <p class="label">Card number</p>
+  <p><input size="30" placeholder="1234 1234 1234 1234"></p>
+  <p class="label">Expiry and CVC</p>
+  <p><input size="10" placeholder="MM / YY"><input size="8" placeholder="CVC"></p>
+  <p class="label">Name on card</p>
+  <p><input size="30" placeholder="Full name"></p>
+  <p class="label">Billing country</p>
+  <p><input size="30" placeholder="France"></p>
+  <p><input type="submit" value="Pay $9.99"></p>
+  <p class="sep">or</p>
+  <p><input class="pp" type="submit" value="Pay with PayPal"></p>
+  <hr>
+  <p class="fine">Prices in USD. Payment does not grant access to any other
+  page. By continuing you agree to the Terms.</p>
+  <p class="fine"><a href="#">Already paid for this page?</a></p>
+</body></html>
+"""
 
 # A tiny in-process cache keyed by URL string. Honors a very small subset of
 # Cache-Control (max-age). Good enough to avoid re-fetching stylesheets.
@@ -140,6 +197,11 @@ class URL:
 
     def request(self, redirects_left=MAX_REDIRECTS, payload=None):
         """Return (headers_dict, body_str, content_type)."""
+        # view-source: is a developer affordance and is not metered.
+        # data: URLs are inline content, not a page fetch.
+        if self.scheme != "data" and not self.view_source \
+                and is_paywalled(self):
+            return {}, PAYWALL_HTML.replace("__URL__", str(self)), "text/html"
         if self.scheme == "file":
             return self._request_file()
         if self.scheme == "data":
