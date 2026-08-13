@@ -41,6 +41,7 @@ PAYWALL_HTML = """<!doctype html>
   .label { font-size: 13px; font-weight: bold; color: #333; }
   .sep { font-size: 13px; color: #999; }
   .fine { font-size: 12px; color: #8a8a8a; }
+  .pay { background-color: #0b57d0; color: #ffffff; }
   .pp { background-color: #ffc439; color: #17307c; }
   a { color: #0b57d0; }
 </style></head>
@@ -60,7 +61,7 @@ PAYWALL_HTML = """<!doctype html>
   <p><input size="30" placeholder="Full name"></p>
   <p class="label">Billing country</p>
   <p><input size="30" placeholder="France"></p>
-  <p><input type="submit" value="Pay $9.99"></p>
+  <p><input class="pay" type="submit" value="Pay $9.99"></p>
   <p class="sep">or</p>
   <p><input class="pp" type="submit" value="Pay with PayPal"></p>
   <hr>
