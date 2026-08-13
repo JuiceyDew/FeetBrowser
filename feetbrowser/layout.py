@@ -203,6 +203,7 @@ class BlockLayout(LayoutBox):
         self.cursor_x = self.x
         self.cursor_y = self.y
         self.line = []  # pending words on the current line
+        self.line_extra = 0  # height reserved by boxes on this line
 
         # List item bullet.
         if isinstance(self.node, Element) and \
@@ -246,6 +247,9 @@ class BlockLayout(LayoutBox):
         if node.tag == "img":
             self._inline_img(node)
             return
+        if node.tag == "input":
+            self._inline_input(node)
+            return
         if node.tag == "hr":
             self.flush()
             self._draw_hr(node)
@@ -279,7 +283,12 @@ class BlockLayout(LayoutBox):
 
     def flush(self):
         if not self.line:
-            # Still advance for empty <br> lines.
+            # A line holding only a box (img, input) has no words, but
+            # still occupies vertical space.
+            if self.line_extra:
+                self.cursor_y += self.line_extra
+                self.cursor_x = self.x
+                self.line_extra = 0
             return
         metrics = [font.metrics() for _, _, font, _, _ in self.line]
         max_ascent = max(m["ascent"] for m in metrics)
@@ -298,9 +307,11 @@ class BlockLayout(LayoutBox):
             y = baseline - font.metrics("ascent")
             self.display_list.append(DrawText(x + offset, y, word, font, color, node))
             self._maybe_underline(x + offset, y, word, font, color, node)
-        self.cursor_y = baseline + 1.25 * max_descent
+        self.cursor_y = max(baseline + 1.25 * max_descent,
+                            self.cursor_y + self.line_extra)
         self.cursor_x = self.x
         self.line = []
+        self.line_extra = 0
 
     def _maybe_underline(self, x, y, word, font, color, node):
         # Walk up to see if any ancestor requests underline (links, <u>).
@@ -347,6 +358,43 @@ class BlockLayout(LayoutBox):
             DrawText(self.cursor_x + 4, self.cursor_y + 2, label, font,
                      "#888888", node))
         self.cursor_x += w + font.measure(" ")
+        self.line_extra = max(self.line_extra, h + 4)
+
+    def _inline_input(self, node):
+        """Draw a form field. Submission is still not wired, but a field
+        that paints nothing at all is worse than one you can see."""
+        attrs = node.attributes
+        kind = attrs.get("type", "text").lower()
+        font = get_font(13, "normal", "roman", "Helvetica")
+        button = kind in ("submit", "button")
+        if button:
+            label = attrs.get("value", "Submit")
+            w = max(120, font.measure(label) + 32)
+        else:
+            label = attrs.get("placeholder", "")
+            size = attrs.get("size", "")
+            w = int(size) * 8 + 16 if size.isdigit() else 240
+        h = font.metrics("linespace") + 12
+        if self.cursor_x + w > self.x + self.width and self.line:
+            self.flush()
+        top = self.cursor_y + 2
+        x0, x1 = self.cursor_x, self.cursor_x + w
+        if button:
+            fill = resolve_color(node.style.get("background-color")) \
+                or "#0b57d0"
+            ink = resolve_color(node.style.get("color")) or "white"
+            self.display_list.append(DrawRect(x0, top, x1, top + h, fill))
+            self.display_list.append(
+                DrawText(x0 + (w - font.measure(label)) / 2, top + 6,
+                         label, font, ink, node))
+        else:
+            self.display_list.append(DrawRect(x0, top, x1, top + h, "white"))
+            self.display_list.append(DrawOutline(x0, top, x1, top + h, "#9aa0a6"))
+            if label:
+                self.display_list.append(
+                    DrawText(x0 + 8, top + 6, label, font, "#9aa0a6", node))
+        self.cursor_x = x1 + font.measure(" ")
+        self.line_extra = max(self.line_extra, h + 6)
 
     # -- painting --------------------------------------------------------
 
