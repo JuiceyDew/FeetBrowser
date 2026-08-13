@@ -16,6 +16,7 @@ from .net import URL
 from .htmlparser import HTMLParser, Text, Element
 from .cssparser import CSSParser, style
 from .layout import DocumentLayout, paint_tree, get_font
+from . import toes as toes
 
 WIDTH, HEIGHT = 1000, 720
 SCROLL_STEP = 80
@@ -64,12 +65,13 @@ def get_title(node):
 class Tab:
     """One document: its DOM, layout, scroll position and history."""
 
-    def __init__(self, tab_height):
+    def __init__(self, tab_height, browser=None):
         self.history = []
         self.future = []
         self.url = None
         self.scroll = 0
         self.tab_height = tab_height
+        self.browser = browser
         self.display_list = []
         self.document = None
         self.nodes = None
@@ -87,7 +89,13 @@ class Tab:
                 else URL(url)
         self.status = f"Loading {url}..."
         try:
-            _headers, body, ctype = url.request(payload=payload)
+            handled = None
+            if self.browser:
+                handled = toes.first(self.browser.toe_contexts, "handle", url, self)
+            if handled is not None:
+                _headers, body, ctype = handled
+            else:
+                _headers, body, ctype = url.request(payload=payload)
         except Exception as e:  # noqa: BLE001 - surface any network error in-page
             body = f"<h1>Could not load page</h1><pre>{type(e).__name__}: {e}</pre>"
             ctype = "text/html"
@@ -117,11 +125,20 @@ class Tab:
 
     def _build(self, url, body):
         """Parse, collect stylesheets, cascade, and lay out `body`."""
+        if self.browser:
+            body = toes.rewrite(self.browser.toe_contexts, url, body)
         self.nodes = HTMLParser(body).parse()
         self.title = get_title(self.nodes) or str(url)
 
-        # Gather stylesheets: UA + <style> + <link rel=stylesheet>.
+        # Gather stylesheets: UA + toe-injected + <style> + <link rel=stylesheet>.
         rules = list(DEFAULT_STYLE_SHEET)
+        if self.browser:
+            injected = toes.extra_css(self.browser.toe_contexts, url)
+            if injected:
+                try:
+                    rules.extend(CSSParser(injected).parse())
+                except Exception:  # noqa: BLE001 - a broken sheet shouldn't stop the page
+                    pass
         for sheet in inline_styles(self.nodes, []):
             try:
                 rules.extend(CSSParser(sheet).parse())
@@ -245,6 +262,14 @@ class Browser:
         self._resize_after = None
         self._last_size = (WIDTH, HEIGHT)
 
+        # Toes: one Context per loaded toe, all optional hooks.
+        self.toes = toes.discover_toes()
+        self.toe_contexts = [toes.Context(self, toe.module) for toe in self.toes]
+        self.toe_handlers = {}
+        for ctx in self.toe_contexts:
+            for btn in (ctx.call("buttons") or []):
+                self.toe_handlers[btn.id] = ctx
+
         self.window = tkinter.Tk()
         self.window.title("FeetBrowser")
         self.window.geometry(f"{WIDTH}x{HEIGHT}")
@@ -288,7 +313,7 @@ class Browser:
         return max(50, h - CHROME_HEIGHT)
 
     def new_tab(self, url):
-        tab = Tab(self.tab_height())
+        tab = Tab(self.tab_height(), self)
         if url == "about:blank":
             tab.load(_AboutURL())  # routes welcome page through the full pipeline
             tab.status = "Type a URL and press Enter"
@@ -296,6 +321,7 @@ class Browser:
             tab.load(url)
         self.tabs.append(tab)
         self.active_tab = tab
+        toes.dispatch(self.toe_contexts, "on_new_tab")
         self.draw()
 
     def close_tab(self):
@@ -392,8 +418,18 @@ class Browser:
         if 72 <= x < 98 and 48 <= y < 72:
             self._reload()
             return
+        # Toe toolbar buttons.
+        bx = 104
+        for btn in self._toe_buttons():
+            if bx <= x < bx + 26 and 48 <= y < 72:
+                ctx = self.toe_handlers.get(btn.id)
+                if ctx:
+                    ctx.call("on_click", btn.id)
+                self.draw()
+                return
+            bx += 30
         # Address bar.
-        if x >= 104:
+        if x >= 104 + self._toe_buttons_offset():
             self.focus = "address"
             self.address_text = str(self.active_tab.url) if \
                 (self.active_tab and self.active_tab.url and
@@ -415,6 +451,8 @@ class Browser:
 
     def _on_key(self, e):
         if self.focus != "address":
+            if toes.dispatch(self.toe_contexts, "on_keypress", e):
+                return
             return
         if len(e.char) == 1 and ord(e.char) >= 32 and e.char.isprintable():
             self.address_text += e.char
@@ -478,11 +516,13 @@ class Browser:
         if self.active_tab:
             self.active_tab.tab_height = self.tab_height()
             self.active_tab.draw(self.canvas, CHROME_HEIGHT)
+        toes.dispatch(self.toe_contexts, "on_draw", self.canvas, CHROME_HEIGHT)
         # Chrome background covers page content that scrolled up under it.
         self.canvas.create_rectangle(0, 0, self.canvas.winfo_width(),
                                      CHROME_HEIGHT, fill="#e8e8e8", width=0)
         self._draw_tabs()
         self._draw_toolbar()
+        self._draw_toe_buttons()
         self._draw_status()
         self._draw_scrollbar()
         self.window.title(
@@ -523,21 +563,38 @@ class Browser:
         btn(72, "⟳", bool(tab))
 
         # Address bar.
-        c.create_rectangle(104, 48, c.winfo_width() - 8, 72,
+        addr_x = 104 + self._toe_buttons_offset()
+        c.create_rectangle(addr_x, 48, c.winfo_width() - 8, 72,
                            outline="#3b82f6" if self.focus == "address" else "#999",
                            fill="white", width=2 if self.focus == "address" else 1)
         if self.focus == "address":
             text = self.address_text
-            c.create_text(114, 60, text=text, anchor="w",
+            c.create_text(addr_x + 10, 60, text=text, anchor="w",
                           font=self.chrome_font, fill="#111")
             w = self.chrome_font.measure(text)
-            c.create_line(116 + w, 52, 116 + w, 68, fill="#111")
+            c.create_line(addr_x + 12 + w, 52, addr_x + 12 + w, 68, fill="#111")
         else:
             url = ""
             if tab and tab.url and not isinstance(tab.url, _AboutURL):
                 url = str(tab.url)
-            c.create_text(114, 60, text=url, anchor="w",
+            c.create_text(addr_x + 10, 60, text=url, anchor="w",
                           font=self.chrome_font, fill="#111")
+
+    def _toe_buttons(self):
+        return [btn for ctx in self.toe_contexts for btn in (ctx.call("buttons") or [])]
+
+    def _toe_buttons_offset(self):
+        return len(self._toe_buttons()) * 30
+
+    def _draw_toe_buttons(self):
+        c = self.canvas
+        x = 104
+        for btn in self._toe_buttons():
+            c.create_rectangle(x, 48, x + 26, 72, outline="#999",
+                               fill="#fdf6e3", width=1)
+            c.create_text(x + 13, 60, text=btn.glyph[:2], fill="#333",
+                          font=self.bold_font)
+            x += 30
 
     def _draw_status(self):
         c = self.canvas

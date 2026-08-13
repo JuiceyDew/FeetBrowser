@@ -65,7 +65,14 @@ class URL:
         elif self.scheme == "data":
             self.data_payload = rest
         else:
-            raise ValueError(f"Unsupported URL scheme: {self.scheme}")
+            # Unknown scheme: parse it anyway so extensions can intercept it
+            # through the toes handle hook. Fetching it still fails loudly.
+            if rest.startswith("//"):
+                self._parse_http(rest)
+            else:
+                self.host = ""
+                self.path = rest or "/"
+                self.port = None
 
     def _parse_http(self, rest):
         # rest looks like //host[:port]/path?query#frag
