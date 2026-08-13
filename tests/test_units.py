@@ -109,6 +109,22 @@ def test_error_page_fallback():
     assert tab.document is not None, "error page laid out"
 
 
+def test_unsupported_color_syntax_does_not_crash_paint():
+    """Colors Tk cannot parse must be dropped, not handed to the canvas.
+
+    resolve_color() used to pass CSS values through verbatim, so any modern
+    color syntax raised TclError at paint time -- outside the try/except that
+    guards layout, which crashed the event loop instead of the page.
+    """
+    tab = Tab(700)
+    tab.load("data:text/html,<style>body{background-color:var(--pri)}"
+             "p{color:rgb(1,2,3)}i{color:color-mix(in srgb,red,blue)}"
+             "</style><body><p>hi</p><i>there</i></body>")
+    canvas = tkinter.Canvas(tkinter._default_root)
+    for cmd in tab.display_list:
+        cmd.execute(0, canvas)  # must not raise
+
+
 def main():
     root = tkinter.Tk(); root.withdraw()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

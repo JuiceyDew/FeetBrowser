@@ -97,13 +97,33 @@ def parse_px(value, default=0.0):
         return default
 
 
+_COLOR_CACHE = {}
+
+
+def _tk_understands(color):
+    """Whether Tk can parse `color`. Cached; Tk is the paint surface, so it
+    is also the authority on color values -- same reason get_font() asks it
+    for metrics rather than guessing."""
+    if color not in _COLOR_CACHE:
+        try:
+            tkinter._default_root.winfo_rgb(color)
+            _COLOR_CACHE[color] = True
+        except (tkinter.TclError, AttributeError):
+            _COLOR_CACHE[color] = False
+    return _COLOR_CACHE[color]
+
+
 def resolve_color(name):
     if not name:
         return None
     name = name.strip().lower()
     if name in ("transparent", "none", "currentcolor", "inherit", "initial"):
         return None
-    return name  # Tk understands names and #rrggbb
+    # CSS has far more color syntax than Tk: var(), rgb(), hsl(), color-mix(),
+    # #rgba. Treat anything Tk cannot parse as absent -- callers already fall
+    # back. Passing it through raised TclError at paint time, after the
+    # try/except that guards layout.
+    return name if _tk_understands(name) else None
 
 
 class LayoutBox:
