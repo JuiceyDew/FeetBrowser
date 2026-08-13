@@ -81,6 +81,10 @@ class Context:
             A key was pressed while no address bar had focus. Return True to
             swallow the key, False to let the browser handle it.
 
+        on_motion(x, y)             -> None
+            The mouse moved over the page (document coordinates, below the
+            chrome). Fired on every motion event, so keep it cheap.
+
         on_new_tab()                -> None
             A new tab was created.
     """

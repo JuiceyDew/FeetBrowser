@@ -1,0 +1,6 @@
+{
+  "name": "sock-detective",
+  "version": "0.1.0",
+  "description": "A hard-boiled private investigator for page guts. Toggle sniff mode with the button and hover, or open toe://sock for the full case file.",
+  "entry": "toe.py"
+}

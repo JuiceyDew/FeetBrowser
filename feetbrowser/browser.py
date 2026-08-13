@@ -440,7 +440,9 @@ class Browser:
         if not self.active_tab:
             return
         if e.y >= CHROME_HEIGHT:
-            href = self.active_tab.link_at(e.x, e.y - CHROME_HEIGHT)
+            doc_x, doc_y = e.x, e.y - CHROME_HEIGHT
+            toes.dispatch(self.toe_contexts, "on_motion", doc_x, doc_y)
+            href = self.active_tab.link_at(doc_x, doc_y)
             self.canvas.config(cursor="hand2" if href else "")
             new_status = href or str(self.active_tab.url or "")
             if new_status != self.active_tab.status:

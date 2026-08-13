@@ -64,10 +64,12 @@ feetbrowser/
 toes/
   word-count/    sample toe: page word count (on_load + extra_css)
   toe-scheme/    sample toe: the toe:// scheme (handle)
+  sock-detective/ sample toe: foot-themed devtools (sniff mode + toe://sock reports)
 tests/
   test_units.py  offline unit tests (URL, HTML, CSS, internal pages)
   test_nav.py    click-to-navigate, history, view-source
   test_toes.py   toe engine + sample toe tests
+  test_sock.py   sock-detective toe tests
   smoke.py       end-to-end pipeline on real pages
 ```
 

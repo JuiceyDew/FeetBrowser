@@ -42,6 +42,7 @@ last one wins.
 | `buttons()` | building the toolbar | list of `toes.ButtonDef(id, glyph)` |
 | `on_click(button_id)` | a toe toolbar button is clicked | — |
 | `on_keypress(event)` | a key is pressed (no address-bar focus) | `True` to swallow the key |
+| `on_motion(x, y)` | the mouse moved over the page (document coords) | — |
 | `on_new_tab()` | a new tab is created | — |
 
 Helpers on the context: `ctx.current_tab()`, `ctx.tabs()`, `ctx.set_status(msg)`,
@@ -60,3 +61,9 @@ See `toes/toe-scheme/toe.py` for a complete example.
   (demonstrates `on_load` + `extra_css`).
 - **toe-scheme** — registers the `toe://` scheme: `toe://hello` says hi,
   `toe://gallery` lists every installed toe (demonstrates `handle`).
+- **sock-detective** — devtools, foot themed and hard-boiled. The "sock"
+  toolbar button toggles sniff mode: hover the page and a red box names the
+  element under your cursor. `toe://sock` and friends (`/dom`, `/layout`,
+  `/style`, `/cases`, `/errors`, `/help`) are full case files on the page's
+  guts, all rendered through the normal pipeline (demonstrates `on_draw`,
+  `on_motion`, `on_click`, `on_keypress`, `handle`).
