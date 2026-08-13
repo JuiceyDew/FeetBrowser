@@ -9,13 +9,15 @@ second canvas so the whole browser really is "from scratch".
 """
 
 import os
+import re
 import sys
 import tkinter
+import urllib.parse
 
 from .net import URL
 from .htmlparser import HTMLParser, Text, Element
 from .cssparser import CSSParser, style
-from .layout import DocumentLayout, paint_tree, get_font
+from .layout import (DocumentLayout, paint_tree, get_font, DrawOutline)
 
 WIDTH, HEIGHT = 1000, 720
 SCROLL_STEP = 80
@@ -75,16 +77,20 @@ class Tab:
         self.nodes = None
         self.title = "New Tab"
         self.status = ""
+        self.focused_input = None
+        self._refresh_hops = 0
 
     # -- navigation ------------------------------------------------------
 
-    def load(self, url, payload=None, push=True):
+    def load(self, url, payload=None, push=True, refresh=False):
         if isinstance(url, str):
             base = self.url
             url = base.resolve(url) if (base and "://" not in url
                                         and not url.startswith(("data:", "file:",
                                                                 "view-source:"))) \
                 else URL(url)
+        if not refresh:
+            self._refresh_hops = 0
         self.status = f"Loading {url}..."
         try:
             _headers, body, ctype = url.request(payload=payload)
@@ -97,6 +103,7 @@ class Tab:
             self.future.clear()
         self.url = url
         self.scroll = 0
+        self.focused_input = None
 
         if url.view_source or ctype.startswith("text/plain"):
             escaped = (body.replace("&", "&amp;")
@@ -110,6 +117,13 @@ class Tab:
                    f"<pre>{type(e).__name__}: {e}</pre>")
             self.title = "Error"
             self._build(url, err)
+
+        # A JS-required wall (Google) falls back to a JS-free results engine.
+        if self._maybe_escape_google_wall(url, body):
+            return
+        # Sites that only do <meta http-equiv=refresh> redirects.
+        if self._maybe_meta_refresh(url, body):
+            return
 
         self.status = str(url)
         if getattr(url, "fragment", ""):
@@ -137,6 +151,64 @@ class Tab:
 
         style(self.nodes, rules)
         self.render()
+
+    # -- JS-free navigation helpers -------------------------------------
+
+    def _maybe_escape_google_wall(self, url, body):
+        """Fall back to a JS-free results page when Google demands JS.
+
+        Google serves a stub with a meta-refresh to its ``enablejs`` page for
+        any client that can't run JavaScript. When that happens for a real
+        query, continue the search on the no-JS search front-end instead of
+        dead-ending on the wall.
+        """
+        q = self._extract_q(url)
+        if not q:
+            return False
+        low_body = (body or "").lower()
+        host = (getattr(url, "host", "") or "").lower()
+        if "google.com" not in host:
+            return False
+        if "enablejs" not in low_body and "enable JavaScript" not in low_body \
+                and "/httpservice/retry/" not in low_body:
+            return False
+        self.status = "Google requires JavaScript — showing DuckDuckGo results"
+        dest = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(q)
+        self.load(dest, push=False, refresh=True)
+        return True
+
+    @staticmethod
+    def _extract_q(url):
+        try:
+            query = urllib.parse.urlparse(str(url)).query
+            return urllib.parse.parse_qs(query).get("q", [""])[0]
+        except Exception:  # noqa: BLE001 - malformed URL is not a query
+            return ""
+
+    def _maybe_meta_refresh(self, url, body):
+        """Follow ``<meta http-equiv=refresh content="0;url=...">``."""
+        if self._refresh_hops >= 8:
+            return False
+        tag = re.search(r'<meta[^>]*http-equiv=["\']?refresh["\']?[^>]*>',
+                        body or "", re.I)
+        if not tag:
+            return False
+        content = re.search(r'content=["\']?([^"\'>]+)', tag.group(0), re.I)
+        if not content:
+            return False
+        target = re.search(r"url\s*=\s*([^;'\" >]+)", content.group(1), re.I)
+        if not target:
+            return False
+        try:
+            new_url = url.resolve(target.group(1).strip())
+        except Exception:  # noqa: BLE001 - nonsense target, keep the page
+            return False
+        if str(new_url) == str(url):
+            return False
+        self._refresh_hops += 1
+        self.status = "Redirecting…"
+        self.load(new_url, push=False, refresh=True)
+        return True
 
     def render(self):
         self.document = DocumentLayout(self.nodes, WIDTH)
@@ -215,13 +287,100 @@ class Tab:
 
     def click(self, x, y):
         """Handle a click at document coords; returns a URL to load or None."""
-        href = self._enclosing_link(self._node_at(x, y))
+        node = self._node_at(x, y)
+        if isinstance(node, Element) and node.tag in ("input", "textarea"):
+            ftype = (node.attributes.get("type", "text") or "text").lower()
+            if ftype == "submit":
+                return self._form_action(node)
+            if ftype in ("text", "search", "email", "url", "password") \
+                    or node.tag == "textarea":
+                self.focused_input = node
+                return None
+            return None  # checkbox/radio/hidden: nothing yet
+        self.focused_input = None
+        href = self._enclosing_link(node)
         if not href:
             return None
         if href.startswith(("javascript:", "mailto:", "tel:")):
             self.status = href
             return None
         return self.url.resolve(href)
+
+    # -- form controls ---------------------------------------------------
+
+    def type_into(self, char):
+        """Append one char to the focused field's value and re-render."""
+        if not self.focused_input:
+            return False
+        cur = self.focused_input.attributes.get("value", "")
+        if self.focused_input.tag == "textarea":
+            cur = self._textarea_value()
+        self.focused_input.attributes["value"] = cur + char
+        self._render_focused_input()
+        return True
+
+    def backspace_input(self):
+        if not self.focused_input:
+            return False
+        cur = self.focused_input.attributes.get("value", "")
+        if self.focused_input.tag == "textarea":
+            cur = self._textarea_value()
+        self.focused_input.attributes["value"] = cur[:-1]
+        self._render_focused_input()
+        return True
+
+    def _textarea_value(self):
+        return "".join(c.text for c in self.focused_input.children
+                       if isinstance(c, Text))
+
+    def _render_focused_input(self):
+        # Re-layout the existing DOM (same node objects) so the typed value
+        # shows up, without re-fetching or re-parsing the page.
+        self.render()
+
+    def submit_form(self):
+        """Build the URL a focused field's form submits to, or None."""
+        if not self.focused_input:
+            return None
+        return self._form_action(self.focused_input)
+
+    def _form_action(self, node):
+        """Collect a form's named fields and return the submission URL."""
+        form = node
+        while form is not None and not (isinstance(form, Element)
+                                        and form.tag == "form"):
+            form = form.parent
+        base = self.url if self.url is not None else URL("https://localhost/")
+        scope = tree_to_list(form, []) if form is not None \
+            else tree_to_list(self.nodes, [])
+        pairs = {}
+        order = []
+        for n in scope:
+            if not (isinstance(n, Element) and n.tag == "input"
+                    and n.attributes.get("name")):
+                continue
+            ftype = (n.attributes.get("type", "text") or "text").lower()
+            if ftype in ("submit", "button", "reset", "image", "file"):
+                continue
+            name = n.attributes["name"]
+            if name not in pairs:
+                pairs[name] = n.attributes.get("value", "")
+                order.append(name)
+        # Include the clicked submit button's own name/value.
+        ftype = (node.attributes.get("type", "text") or "text").lower()
+        if ftype == "submit":
+            name = node.attributes.get("name")
+            if name and name not in pairs:
+                pairs[name] = node.attributes.get("value", "")
+                order.append(name)
+        action = form.attributes.get("action", "") if form is not None \
+            else base.path
+        action_url = base.resolve(action) if action else base
+        if not pairs:
+            return action_url
+        query = urllib.parse.urlencode([(k, pairs[k]) for k in order])
+        sep = "&" if ("?" in str(action_url)) else "?"
+        return URL(str(action_url) + sep + query)
 
     def link_at(self, x, y):
         """Return href under the cursor for hover feedback, else None."""
@@ -414,16 +573,23 @@ class Browser:
             self.canvas.config(cursor="")
 
     def _on_key(self, e):
-        if self.focus != "address":
+        if self.focus == "address":
+            if len(e.char) == 1 and ord(e.char) >= 32 and e.char.isprintable():
+                self.address_text += e.char
+                self.draw()
             return
-        if len(e.char) == 1 and ord(e.char) >= 32 and e.char.isprintable():
-            self.address_text += e.char
-            self.draw()
+        if self.active_tab and self.active_tab.focused_input:
+            if len(e.char) == 1 and ord(e.char) >= 32 and e.char.isprintable():
+                if self.active_tab.type_into(e.char):
+                    self.draw()
 
     def _on_backspace(self, e):
         if self.focus == "address":
             self.address_text = self.address_text[:-1]
             self.draw()
+        elif self.active_tab and self.active_tab.focused_input:
+            if self.active_tab.backspace_input():
+                self.draw()
 
     def _on_enter(self, e):
         if self.focus == "address" and self.address_text.strip():
@@ -437,6 +603,11 @@ class Browser:
                 query = "https://" + query
             if self.active_tab:
                 self.active_tab.load(query)
+            self.draw()
+        elif self.active_tab and self.active_tab.focused_input:
+            dest = self.active_tab.submit_form()
+            if dest:
+                self.active_tab.load(dest)
             self.draw()
 
     @staticmethod
@@ -485,6 +656,7 @@ class Browser:
         self._draw_toolbar()
         self._draw_status()
         self._draw_scrollbar()
+        self._draw_caret()
         self.window.title(
             (self.active_tab.title if self.active_tab else "FeetBrowser")
             + " — FeetBrowser")
@@ -567,6 +739,25 @@ class Browser:
         thumb_top = track_top + (track_h - thumb_h) * (tab.scroll / (total - view))
         c.create_rectangle(track_x, thumb_top, track_x + 6, thumb_top + thumb_h,
                            fill="#9aa0a6", width=0)
+
+    def _draw_caret(self):
+        tab = self.active_tab
+        if not tab or not tab.focused_input:
+            return
+        node = tab.focused_input
+        box = None
+        for cmd in tab.display_list:
+            if isinstance(cmd, DrawOutline) and cmd.node is node:
+                box = cmd
+                break
+        if not box:
+            return
+        font = get_font(14, "normal", "roman")
+        value = node.attributes.get("value", "")
+        cx = box.left + 6 + font.measure(value)
+        cy = box.top - tab.scroll + CHROME_HEIGHT + 5
+        self.canvas.create_line(cx, cy, cx, cy + font.metrics("linespace"),
+                                fill="#111", width=1)
 
     def run(self):
         self.window.update_idletasks()
