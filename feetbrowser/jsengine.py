@@ -73,16 +73,6 @@ class _Return(BaseException):
         self.value = value
 
 
-class _ExecutionBudget(BaseException):
-    """Raised when a script exceeds the interpreter's step budget.
-
-    Deliberately a BaseException so a JavaScript `try/catch` cannot swallow
-    it: runaway loops must terminate the script no matter what the page does.
-    """
-
-    __slots__ = ()
-
-
 class _Break(BaseException):
     __slots__ = ()
 
@@ -1738,11 +1728,6 @@ _SIMPLE_ESC = {"n": "\n", "t": "\t", "\\": "\\", "'": "'", '"': '"',
 #: Defensive cap so pathological inputs cannot exhaust memory in the lexer.
 _MAX_TOKENS = 200_000
 
-#: Step budget per unit of JS execution (one `run()`, one timer callback, one
-#: microtask): total AST nodes evaluated. Generous for real scripts, but an
-#: infinite loop cannot run the UI thread off a cliff.
-_MAX_STEPS = 8_000_000
-
 #: Max single allocation for JS array/string operations, so `Array(1e9)` or
 #: `"x".repeat(1e9)` can't allocate gigabytes in one call.
 _MAX_ARRAY_LEN = 1_000_000
@@ -2916,28 +2901,17 @@ class Interpreter:
         self._timers = []
         self._timer_seq = 0
         self._now = 0.0
-        self._steps = 0
 
     # -- public API ------------------------------------------------------
-
-    def _tick(self):
-        """Account for one evaluated AST node; abort runaway scripts."""
-        self._steps += 1
-        if self._steps > _MAX_STEPS:
-            raise _ExecutionBudget("Script exceeded the execution budget "
-                                   "(possible infinite loop)")
 
     def run(self, source):
         """Parse and execute a whole program statement-by-statement."""
         program = _Parser(source).parse_program()
-        self._steps = 0
         try:
             self._pump_sync(self._exec_block(program.statements,
                                              self._global_env))
         except (_Return, _Break, _Continue):
             raise JSException("Illegal statement outside its context.") from None
-        except _ExecutionBudget as e:
-            raise JSException(str(e)) from None
         except _JSThrow as t:
             raise JSException(self.repr(t.value)) from None
         except JSException:
@@ -2947,11 +2921,8 @@ class Interpreter:
 
     def call(self, fn, *args):
         """Call a JSFunction, a plain Python callable, or a host object."""
-        self._steps = 0
         try:
             return self._call_value(fn, list(args))
-        except _ExecutionBudget as e:
-            raise JSException(str(e)) from None
         except _JSThrow as t:
             raise JSException(self.repr(t.value)) from None
         except Exception as exc:
@@ -3527,14 +3498,11 @@ class Interpreter:
                     self._microtasks.clear()
                     return
                 job = self._microtasks.popleft()
-                self._steps = 0
                 processed += 1
                 try:
                     job()
                 except (_JSThrow, JSException) as e:
                     self.logs.append(self._error_text(e))
-                except _ExecutionBudget as e:
-                    self.logs.append("JS error: " + str(e))
             due = [t for t in self._timers if t.due <= self._now]
             if not due:
                 return
@@ -3543,14 +3511,11 @@ class Interpreter:
                     self.logs.append("JS error: too many timer callbacks")
                     return
                 self._timers.remove(t)
-                self._steps = 0
                 processed += 1
                 try:
                     self._call_value(t.fn, t.args)
                 except (_JSThrow, JSException) as e:
                     self.logs.append(self._error_text(e))
-                except _ExecutionBudget as e:
-                    self.logs.append("JS error: " + str(e))
                 if t.repeat:
                     t.due += t.interval
                     self._timers.append(t)
@@ -3742,9 +3707,6 @@ class Interpreter:
         except JSException as e:
             promise.reject(str(e))
             return
-        except _ExecutionBudget as e:
-            promise.reject(str(e))
-            return
         if isinstance(value, _Suspend):
             p = value.promise
 
@@ -3779,7 +3741,6 @@ class Interpreter:
         return None
 
     def _eval(self, node, env):
-        self._tick()
         if isinstance(node, Literal):
             return node.value
         if isinstance(node, Identifier):
@@ -4176,7 +4137,6 @@ class Interpreter:
             yield from self._exec(stmt, env)
 
     def _exec(self, node, env):
-        self._tick()
         if isinstance(node, Block):
             yield from self._exec_block(node.statements, Environment(env))
         elif isinstance(node, VarDecl):
