@@ -3,6 +3,10 @@ __pycache__/
 *.pyo
 .venv/
 
+# Zig build artifacts
+zig/.zig-cache/
+zig/zig-out/
+
 # local session helper
 session
 
