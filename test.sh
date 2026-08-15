@@ -72,6 +72,7 @@ $run tests/test_cocoa.py   # opens real windows on macOS, skips elsewhere
 $run tests/test_x11.py     # opens real windows under X11, skips elsewhere
 $run tests/test_win32.py   # opens real windows on Windows, skips elsewhere
 $run tests/test_units.py
+$run tests/test_brainfuck.py
 $run tests/test_js.py
 $run tests/test_shoes.py
 $run tests/test_e2e.py     # a fixture page in, its pixels back out

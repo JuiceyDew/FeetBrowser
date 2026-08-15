@@ -75,6 +75,7 @@ rem one that skips everywhere else.
 %RUN% tests\test_x11.py || exit /b 1
 %RUN% tests\test_win32.py || exit /b 1
 %RUN% tests\test_units.py || exit /b 1
+%RUN% tests\test_brainfuck.py || exit /b 1
 %RUN% tests\test_js.py || exit /b 1
 %RUN% tests\test_shoes.py || exit /b 1
 rem A fixture page in, its pixels back out.

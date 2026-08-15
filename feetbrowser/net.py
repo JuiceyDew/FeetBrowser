@@ -259,6 +259,7 @@ class URL:
     def __init__(self, url):
         self.raw = url
         self.view_source = False
+        self.brainfuck = False
         self.fragment = ""
         self.host = ""
         self.port = None
@@ -267,6 +268,10 @@ class URL:
         if url.startswith("view-source:"):
             self.view_source = True
             url = url[len("view-source:"):]
+            self.raw = url
+        if url.startswith("bf-source:"):
+            self.brainfuck = True
+            url = url[len("bf-source:"):]
             self.raw = url
 
         # Split scheme. Anything without a known scheme is treated as a bare
@@ -409,6 +414,7 @@ class URL:
                 parts.append(seg)
         new_url = URL(f"{self.scheme}://{self.netloc()}{'/' + '/'.join(parts)}")
         new_url.view_source = self.view_source
+        new_url.brainfuck = self.brainfuck
         return new_url
 
     def netloc(self):
@@ -428,12 +434,14 @@ class URL:
         self.path = other.path
         self.fragment = other.fragment
         self.view_source = other.view_source
+        self.brainfuck = other.brainfuck
         self.raw = other.raw
         if hasattr(other, "data_payload"):
             self.data_payload = other.data_payload
 
     def __str__(self):
-        prefix = "view-source:" if self.view_source else ""
+        prefix = ("bf-source:" if self.brainfuck
+                  else "view-source:" if self.view_source else "")
         if self.scheme in ("http", "https"):
             frag = f"#{self.fragment}" if getattr(self, "fragment", "") else ""
             return f"{prefix}{self.scheme}://{self.netloc()}{self.path}{frag}"

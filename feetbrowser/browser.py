@@ -38,6 +38,7 @@ from .selection import Index as SelectionIndex, Selection, \
 from . import shoes as shoes
 from . import downloads as downloads
 from . import media
+from . import brainfuck
 from .jsdom import JSDocument, JSLocation, _JSStaticProps, _JSComputedStyle
 from .jsengine import Interpreter, JSException, UNDEFINED
 from . import toes as toes
@@ -388,7 +389,8 @@ class Tab:
             base = self.url
             url = base.resolve(url) if (base and "://" not in url
                                         and not url.startswith(("data:", "file:",
-                                                                "view-source:"))) \
+                                                                "view-source:",
+                                                                "bf-source:"))) \
                 else URL(url)
 
         # Remote pages must not navigate into the local filesystem: a link to
@@ -408,6 +410,8 @@ class Tab:
         self.status = f"Loading {url}..."
         if url.view_source:
             self.status = "Loading source..."
+        if url.brainfuck:
+            self.status = "Compiling to Brainfuck..."
         self.focused_input = None
         self.form_values = {}
         self.selection = None
@@ -600,7 +604,13 @@ class Tab:
         self.url = url
         self.scroll = pending_scroll or 0
 
-        if url.view_source or ctype.startswith("text/plain"):
+        if url.brainfuck:
+            body = brainfuck.compile(body)
+            escaped = (body.replace("&", "&amp;")
+                       .replace("<", "&lt;").replace(">", "&gt;"))
+            body = f"<pre>{escaped}</pre>"
+            ctype = "text/html"
+        elif url.view_source or ctype.startswith("text/plain"):
             escaped = (body.replace("&", "&amp;")
                        .replace("<", "&lt;").replace(">", "&gt;"))
             body = f"<pre>{escaped}</pre>"
@@ -4023,7 +4033,8 @@ class Browser:
                     query = "https://duckduckgo.com/html/?q=" + \
                         query.replace(" ", "+")
                 elif "://" not in query and not query.startswith(
-                        ("file:", "data:", "view-source:", "about:")):
+                        ("file:", "data:", "view-source:", "bf-source:",
+                         "about:")):
                     query = "https://" + query
                 dest = query
             if self.active_tab:
@@ -4042,7 +4053,7 @@ class Browser:
         if " " in text.strip():
             return False
         if text.startswith(("http://", "https://", "file:", "data:",
-                            "view-source:", "about:")):
+                            "view-source:", "bf-source:", "about:")):
             return True
         if text.startswith("."):
             return False
@@ -5122,6 +5133,7 @@ def _resolve_internal(url, bookmarks=None, snapshot=None, theme=None,
 class _AboutURL:
     """Placeholder URL for the internal welcome page."""
     view_source = False
+    brainfuck = False
     fragment = ""
 
     def __init__(self, bookmarks_provider=None, theme=None, apply=None,
@@ -5147,6 +5159,7 @@ class _AboutURL:
 class _BookmarksURL:
     """Internal URL for the bookmarks page."""
     view_source = False
+    brainfuck = False
     fragment = ""
 
     def __init__(self, bookmarks_provider=None, theme=None, apply=None,
@@ -5173,6 +5186,7 @@ class _BookmarksURL:
 class _HistoryURL:
     """Internal URL for the current tab's history page."""
     view_source = False
+    brainfuck = False
     fragment = ""
 
     def __init__(self, snapshot_provider=None, theme=None, apply=None,
@@ -5199,6 +5213,7 @@ class _HistoryURL:
 class _ShoesURL:
     """Internal URL for the theme picker page (about:shoes)."""
     view_source = False
+    brainfuck = False
     fragment = ""
 
     def __init__(self, apply=None, theme=None, active=None):
@@ -5221,6 +5236,7 @@ class _ShoesURL:
 class _ShoesApplyURL:
     """Internal URL that applies a shoe when visited (about:shoes/<Name>)."""
     view_source = False
+    brainfuck = False
     fragment = ""
 
     def __init__(self, name, apply=None, theme=None, active=None):

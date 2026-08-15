@@ -22,6 +22,8 @@ options:
   --toe-disable <name>     disable an installed toe
   --new-toe <name>         scaffold a new toe
   --toe-docs               print the Toes documentation
+  --to-bf <file>           compile the file's contents to Brainfuck and print
+                           the program (use - for stdin)
 
 If no URL is given the browser opens the welcome page.
 """
@@ -72,6 +74,19 @@ def main():
         sys.exit(toes.new_toe(args[1]))
     if flag == "--toe-docs":
         toes.toe_docs()
+        return
+    if flag == "--to-bf":
+        if len(args) < 2:
+            print("usage: python3 -m feetbrowser --to-bf <file>")
+            sys.exit(1)
+        from .brainfuck import compile
+        path = args[1]
+        if path == "-":
+            text = sys.stdin.read()
+        else:
+            with open(path, encoding="utf-8") as handle:
+                text = handle.read()
+        print(compile(text))
         return
     # Anything else is a URL passed to the browser.
     from .browser import main as browser_main

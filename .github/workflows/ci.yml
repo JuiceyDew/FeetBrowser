@@ -78,6 +78,9 @@ jobs:
         run: $PY tests/test_units.py
 
       # The engine answers to one contract, and the same suite holds it to it.
+      - name: Brainfuck backend
+        run: $PY tests/test_brainfuck.py
+
       - name: JS engine tests
         run: $PY tests/test_js.py
 
