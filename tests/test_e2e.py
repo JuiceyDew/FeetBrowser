@@ -38,6 +38,13 @@ from feetbrowser.layout import DrawText
 from feetbrowser.net import URL
 from feetbrowser.window import Event
 
+# A real Browser() reads ~/.feetbrowser_settings.json for its scroll and
+# momentum settings. Point it at a throwaway file so the machine's own
+# settings cannot change what pixels this suite expects.
+from feetbrowser import settings as _settings
+_settings.SETTINGS_FILE = os.path.join(
+    tempfile.mkdtemp(prefix="feetbrowser-e2e-"), "settings.json")
+
 from fixture_server import FixtureServer
 
 
@@ -381,8 +388,8 @@ def test_settings_menu_opens_from_hamburger_button():
     menu = browser.context_menu
     assert menu.open_, "clicking the hamburger did not open the menu"
     labels = [item[0] for item in menu.items if item is not None]
-    assert labels == ["Bookmarks", "History", "Downloads", "Manage Shoes",
-                      "Manage Toes"], (
+    assert labels == ["Settings", "Bookmarks", "History", "Downloads",
+                      "Manage Shoes", "Manage Toes"], (
         "unexpected settings menu items: %r" % labels)
     # The menu hangs from the button's right edge, below the toolbar.
     band = browsermod.toes.band_height(browser.chrome_bands())
@@ -402,7 +409,7 @@ def test_settings_menu_bookmarks_opens_new_tab():
     browser = _browser()
     _hamburger_click(browser)
     menu = browser.context_menu
-    browser._context_menu_click(menu.x + 20, _menu_item_y(menu, 0))
+    browser._context_menu_click(menu.x + 20, _menu_item_y(menu, 1))
     assert not menu.open_, "choosing an item left the menu open"
     assert len(browser.tabs) == 2, "Bookmarks did not open a new tab"
     assert isinstance(browser.active_tab.url, browsermod._BookmarksURL), (
@@ -416,7 +423,7 @@ def test_settings_menu_manage_toes_opens_the_hub():
     browser = _browser()
     _hamburger_click(browser)
     menu = browser.context_menu
-    browser._context_menu_click(menu.x + 20, _menu_item_y(menu, 6))
+    browser._context_menu_click(menu.x + 20, _menu_item_y(menu, 7))
     assert not menu.open_, "choosing an item left the menu open"
     assert len(browser.tabs) == 2, "Manage Toes did not open a new tab"
     assert str(browser.active_tab.url) == "toe://hub", (

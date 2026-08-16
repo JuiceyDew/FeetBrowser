@@ -93,6 +93,7 @@ rem The version guard release.yml runs before it builds anything.
 %RUN% tests\test_release_version.py || exit /b 1
 %RUN% tests\test_js.py || exit /b 1
 %RUN% tests\test_shoes.py || exit /b 1
+%RUN% tests\test_settings.py || exit /b 1
 rem A fixture page in, its pixels back out.
 %RUN% tests\test_e2e.py || exit /b 1
 %RUN% tests\test_nav.py || exit /b 1

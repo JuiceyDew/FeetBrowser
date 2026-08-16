@@ -1,6 +1,7 @@
 """Fast, offline unit tests for URL parsing, HTML, CSS, and internal pages."""
 import http.server
 import socket
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -24,6 +25,13 @@ from feetbrowser.browser import (
     _tab_slot, TAB_LEFT, TAB_WIDTH, TAB_GAP, TAB_CLOSE_W, TAB_DRAG_SLOP,
     NEW_TAB_W
 )
+
+# A real Browser() reads ~/.feetbrowser_settings.json for its scroll and
+# momentum settings. Point the module at a throwaway file so the machine's
+# own settings cannot change what these tests expect.
+from feetbrowser import settings as _settings
+_settings.SETTINGS_FILE = os.path.join(
+    tempfile.mkdtemp(prefix="feetbrowser-units-"), "settings.json")
 
 
 def eq(a, b, msg=""):
@@ -3354,6 +3362,9 @@ class _SelectBrowser(Browser):
         self._scroll_ticks = []
         self._scroll_velocity = 0.0
         self._momentum_job = None
+        self.settings = {"show_link_preview": True, "scroll_speed": 80,
+                         "momentum": True, "momentum_strength": 100,
+                         "search_engine": "duckduckgo"}
         self.paints = 0
         self.canvas = type("C", (), {"winfo_width": lambda s: 1000,
                                      "winfo_height": lambda s: 720})()
@@ -4323,6 +4334,8 @@ class _TabBrowser(Browser):
         self._tab_drag = None
         self._drag_moved = False
         self._click_count = 0
+        self._momentum_job = None
+        self._range_grab = None
         self.paints = 0
         self.canvas = type("C", (), {"winfo_width": lambda s: 1000,
                                      "winfo_height": lambda s: 720})()

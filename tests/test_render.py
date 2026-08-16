@@ -22,6 +22,13 @@ from feetbrowser import fontengine, gui, imagecodec, media, mediacodec, raster
 from feetbrowser.net import URL
 from feetbrowser.window import Event, Window
 
+# A Browser() reads ~/.feetbrowser_settings.json for its momentum and scroll
+# settings. Point the module at a throwaway file so a machine's real settings
+# (momentum off, say) cannot break a test that assumes the defaults.
+from feetbrowser import settings as _settings
+_settings.SETTINGS_FILE = os.path.join(
+    tempfile.mkdtemp(prefix="feetbrowser-test-"), "settings.json")
+
 _FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 
 

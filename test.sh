@@ -86,6 +86,7 @@ $run tests/test_units.py
 $run tests/test_release_version.py  # the guard release.yml runs first
 $run tests/test_js.py
 $run tests/test_shoes.py
+$run tests/test_settings.py
 $run tests/test_e2e.py     # a fixture page in, its pixels back out
 $run tests/test_nav.py
 $run tests/test_toes.py
