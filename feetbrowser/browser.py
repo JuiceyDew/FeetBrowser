@@ -2087,6 +2087,7 @@ class Tab:
     def _range_rect_at(self, x, y):
         """(node, lx, ty, rx, by) for a range input whose box covers (x, y),
         in page coordinates, or None when the point is not on a range."""
+        y += self.scroll
         if not self.document:
             return None
         for lx, ty, rx, by, other in self.document.input_boxes:
@@ -4918,10 +4919,21 @@ class Browser:
 
     def _navigate(self, tab, url, payload=None):
         """Load `url` on `tab`; image fetching + repaint happen when the
-        document is ready (see Tab._complete_load)."""
+        document is ready (see Tab._complete_load).
+
+        Choosing a setting on the settings page (a toggle, a pill, a shoe on
+        the shoe page) reloads that internal page so the new value is shown,
+        but must not be a navigation: it would push a history entry and, more
+        annoyingly, reset the scroll position mid-read. Reload in place,
+        keeping the current scroll, and without touching history.
+        """
         self._cancel_momentum()
         self._dismiss_select_popup()
-        tab.load(url, payload=payload)
+        if isinstance(tab.url, (_SettingsURL, _SettingsApplyURL)) and \
+                isinstance(url, _SettingsApplyURL):
+            tab.load(url, push=False, pending_scroll=tab.scroll)
+        else:
+            tab.load(url, payload=payload)
         self.draw()
 
     # -- painting --------------------------------------------------------
@@ -5504,15 +5516,21 @@ class Browser:
         self._range_glide = None
 
     def _range_drag_to_frac(self, node, frac):
-        """Set a grabbed range's value from a track fraction, updating the
-        live readout beside the slider as it goes."""
+        """Set a grabbed range's value from a track fraction, snapping it to
+        the step grid the input declares so the thumb and readout always show
+        the value that will be committed, updating the live readout as it
+        goes. Snapping while dragging (not on release) is what makes the
+        slider feel solid: no snap-back jump when you let go."""
         try:
             lo = float(node.attributes.get("min", 0))
             hi = float(node.attributes.get("max", 100))
         except ValueError:
             lo, hi = 0.0, 100.0
         span = (hi - lo) or 1.0
+        step = float(node.attributes.get("step", 1) or 1)
         value = lo + frac * span
+        if step:
+            value = lo + round((value - lo) / step) * step
         value = max(lo, min(hi, value))
         node.attributes["value"] = str(int(value))
         self._update_range_readout(node, int(value))
@@ -5552,8 +5570,12 @@ class Browser:
         """Release of a range drag: persist the value and fire `change`.
 
         The stored value is snapped back onto the step grid the input
-        declares, so what gets persisted is a real setting value even though
-        the drag (and glide) moved the thumb continuously.
+        declares, so what gets persisted is a real setting value. When the
+        range is a browser setting slider, apply it straight through the
+        settings machinery instead of firing the JS `change` (which would
+        navigate to an about:settings/<key>/<value> apply URL, churning the
+        address bar and reloading the page). A slider on any other page
+        still fires its inline change handler like a real browser.
         """
         if self._range_grab is None:
             return
@@ -5573,6 +5595,13 @@ class Browser:
         value = max(lo, min(hi, value))
         node.attributes["value"] = str(int(value))
         self._update_range_readout(node, int(value))
+        name = node.attributes.get("name", "")
+        if settings.by_key(name) is not None:
+            # A settings slider: re-layout (so the live readout shows) and
+            # let _apply_setting persist + repaint in place.
+            self.active_tab.render()
+            self._apply_setting(name, int(value))
+            return
         self.active_tab._dispatch_js_event(node, "change")
         self.active_tab.render()
         self._draw_page()
@@ -6289,7 +6318,9 @@ class _SettingsApplyURL:
         return {}, settings_html(values, self.theme, active), "text/html"
 
     def __str__(self):
-        return f"about:settings/{self.key}/{self.value}"
+        # An apply is not a real page: choosing a setting must not surface a
+        # fresh about:settings/<key>/<value> in the address bar (or history).
+        return "about:settings"
 
 
 def _page_palette(theme):
@@ -6520,6 +6551,8 @@ def _toggle_link(setting, value, p):
 def settings_html(values, theme=None, active=None):
     """Render the Settings page: search, scrolling, momentum and the rest.
 
+    Mirrors the New Tab page's look: one centered card on the themed
+    backdrop, the same headline, and the controls as a tidy list inside it.
     Every control is a link back into about:settings/<key>/<value>, so a
     click re-renders the page with the new value already in place, exactly
     like the Shoes picker applies a theme.
@@ -6568,15 +6601,17 @@ def settings_html(values, theme=None, active=None):
 <!doctype html>
 <html><head><title>Settings</title>
 <style>
-  body {{ font-family: Helvetica; margin: 60px; color: {p['text']};
+  body {{ font-family: Helvetica; margin: 0; color: {p['text']};
          background: {p['bg']}; }}
-  h1 {{ font-size: 40px; color: {p['accent']}; }}
-  h2.sec {{ font-size: 24px; color: {p['accent']}; margin-top: 36px; }}
-  .sub {{ color: {p['muted']}; font-size: 18px; }}
-  ul.rows {{ list-style: none; padding: 0; margin-top: 24px;
-             max-width: 760px; }}
-  li.row {{ background: {p['surface']}; border: 1px solid {p['border']};
-            padding: 14px 18px; margin-bottom: 12px; }}
+  .stage {{ display: flex; justify-content: center; }}
+  .shell {{ width: 640px; margin-top: 70px; background: {p['surface']};
+            padding: 36px 44px; box-shadow: 2px 3px 12px {p['border']}; }}
+  h1 {{ font-size: 42px; color: {p['accent']}; margin-top: 0; }}
+  .tagline {{ color: {p['muted']}; font-size: 17px; }}
+  h2.sec {{ font-size: 24px; color: {p['accent']}; margin-top: 30px; }}
+  ul.rows {{ list-style: none; padding: 0; margin: 24px 0 0; }}
+  li.row {{ padding: 16px 0; border-bottom: 1px solid {p['border']}; }}
+  li.row:last-child {{ border-bottom: none; }}
   .lab .name {{ font-weight: bold; font-size: 18px; }}
   .lab .help {{ display: block; color: {p['muted']}; font-size: 14px;
                 margin-top: 2px; }}
@@ -6590,17 +6625,19 @@ def settings_html(values, theme=None, active=None):
   li.shoe.current {{ border-color: {p['accent']}; }}
   li.shoe a {{ text-decoration: none; color: {p['text']}; }}
   .swatches {{ display: flex; gap: 4px; margin-bottom: 10px; }}
-  .name {{ font-weight: bold; }}
+  .shoe .name {{ font-weight: bold; }}
   .inuse {{ color: {p['accent']}; font-weight: bold; }}
   .foot {{ margin-top: 30px; color: {p['muted']}; }}
 </style></head>
 <body>
-  <h1>Settings</h1>
-  <p class="sub">Tune the browser. Every control saves itself the moment
-  you click it.</p>
-  <ul class="rows">{listing}</ul>{theme_cards}
-  <p class="foot">Stored in ~/.feetbrowser_settings.json, alongside any
-  keys other toes keep there.</p>
+  <div class="stage"><div class="shell">
+    <h1>Settings</h1>
+    <p class="tagline">Tune the browser. Every control saves itself the
+    moment you use it.</p>
+    <ul class="rows">{listing}</ul>{theme_cards}
+    <p class="foot">Stored in ~/.feetbrowser_settings.json, alongside any
+    keys other toes keep there.</p>
+  </div></div>
 <script>
 function apply_setting(id) {{
   var el = document.getElementById(id);

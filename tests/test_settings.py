@@ -294,6 +294,90 @@ def test_settings_page_range_drag_applies_the_setting():
         _restore(original)
 
 
+def test_range_grab_still_works_when_the_page_is_scrolled():
+    # The settings page is tall enough to scroll, and the sliders sit below
+    # the fold. Pressing one after scrolling must still grab it: the press
+    # coordinates are window-relative but the hit-test boxes are page
+    # coordinates, so the grab used to miss once the page had moved.
+    from feetbrowser.browser import Browser
+    from feetbrowser.browser import tree_to_list
+    from feetbrowser.htmlparser import Element
+    from feetbrowser.window import Event
+
+    path, original = _fresh_file()
+    root = Tk(); root.withdraw()
+    browser = Browser()
+    try:
+        browser.new_tab("about:settings")
+        browser.draw()
+        tab = browser.tabs[0]
+        tab.set_scroll(300)
+        tab.render()
+        browser.draw()
+        nodes = tree_to_list(tab.nodes, [])
+        node = next(n for n in nodes
+                    if isinstance(n, Element) and n.tag == "input"
+                    and n.attributes.get("name") == "momentum_strength")
+        lx, ty, rx, by = tab._control_rect(node)
+        ch = browser.chrome_height()
+        px = int(lx + (rx - lx) * 0.75)
+        py = int(ty - tab.scroll + 5) + ch
+        browser._on_click(Event(x=px, y=py))
+        assert browser._range_grab is not None, \
+            "a slider below the fold must still grab when the page is scrolled"
+        browser._on_drag(Event(x=px, y=py))
+        browser._on_release(Event(x=px, y=py))
+        eq(browser.settings["momentum_strength"], 75,
+           "a scrolled slider drag still commits its value")
+    finally:
+        browser.window.destroy()
+        _restore(original)
+
+
+def test_toggle_keeps_the_scroll_position():
+    # A toggle (or pill) reloads the settings page so the new value is shown,
+    # but that reload must not be a navigation: it would push a history entry
+    # and, worse, reset the scroll, yanking the reader back to the top of the
+    # page mid-read.
+    from feetbrowser.browser import Browser
+    from feetbrowser.browser import tree_to_list
+    from feetbrowser.htmlparser import Element
+    from feetbrowser.window import Event
+
+    path, original = _fresh_file()
+    root = Tk(); root.withdraw()
+    browser = Browser()
+    try:
+        browser.new_tab("about:settings")
+        browser.draw()
+        tab = browser.tabs[0]
+        tab.set_scroll(300)
+        tab.render()
+        browser.draw()
+        nodes = tree_to_list(tab.nodes, [])
+        tgl = next(n for n in nodes
+                   if isinstance(n, Element)
+                   and n.attributes.get("href", "") == "about:settings/momentum/off")
+        box = None
+        for cmd in tab.display_list:
+            if getattr(cmd, "node", None) is tgl and hasattr(cmd, "top"):
+                box = cmd
+                break
+        assert box is not None, "the momentum toggle did not render"
+        ch = browser.chrome_height()
+        px = int((box.left + (getattr(box, "right", box.left + 1))) / 2)
+        py = int((box.top + box.bottom) / 2 - tab.scroll) + ch
+        browser._on_click(Event(x=px, y=py))
+        eq(browser.settings["momentum"], False, "the toggle flipped momentum")
+        eq(browser.active_tab.scroll, 300,
+           "toggling a setting keeps the scroll position")
+        eq(str(browser.active_tab.url), "about:settings",
+           "the settings page stays, not the apply URL")
+    finally:
+        browser.window.destroy()
+        _restore(original)
+
+
 def test_range_press_on_the_thumb_at_the_max_end_grabs_it():
     # The thumb rides the right edge of the track at max value: pressing it
     # must still grab the range, or the slider is undraggable where it sits
@@ -388,10 +472,10 @@ def test_range_readout_updates_mid_drag_before_release():
         _restore(original)
 
 
-def test_range_drag_is_continuous_not_step_snapped():
-    # The thumb follows the pointer continuously: dragging partway between
-    # two step values must land on the intermediate value, not jump to a
-    # step. Only the release (commit) snaps back onto the grid.
+def test_range_drag_is_wysiwyg_no_snap_back_jump():
+    # The thumb snaps to the step grid while dragging (as a native range
+    # input does), so the value you see is the value you get: releasing
+    # changes nothing and there is no snap-back jump.
     browser, path, original, ttl, Element, Event = _range_browser()
     try:
         node, tab = _range_input(browser, ttl, Element)
@@ -401,12 +485,12 @@ def test_range_drag_is_continuous_not_step_snapped():
         py = int(ty + 5) + ch
         browser._on_click(Event(x=px, y=py))
         browser._on_drag(Event(x=px, y=py))
-        assert int(node.attributes["value"]) == 145, \
-            f"mid-drag value should be continuous, got " \
-            f"{node.attributes['value']!r}"
+        mid = int(node.attributes["value"])
+        assert mid % 10 == 0, \
+            f"mid-drag value should already be on the step grid, got {mid!r}"
         browser._on_release(Event(x=px, y=py))
-        assert int(node.attributes["value"]) in (140, 150), \
-            f"committed value snaps to a step, got " \
+        assert int(node.attributes["value"]) == mid, \
+            f"release must not change the value, got " \
             f"{node.attributes['value']!r}"
     finally:
         browser.window.destroy()
@@ -436,7 +520,9 @@ def test_range_press_glides_instead_of_teleporting():
             time.sleep(0.005)
             browser.window.flush_timers()
         assert browser._range_glide is None, "the glide finishes"
-        eq(node.attributes["value"], "148", "the glide lands on the target")
+        assert int(node.attributes["value"]) % 10 == 0, \
+            f"the glide lands on the step grid, got " \
+            f"{node.attributes['value']!r}"
         browser._on_release(Event(x=0, y=0))
     finally:
         browser.window.destroy()
