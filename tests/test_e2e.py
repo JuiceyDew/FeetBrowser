@@ -349,6 +349,110 @@ def test_pasted_line_breaks_do_not_paint_outside_the_address_bar():
           % len(rows))
 
 
+def _menu_item_y(menu, index):
+    """Canvas y of the centre of the menu item at `index`, or a separator
+    raises. Walks the same row arithmetic ContextMenu.draw uses so the test
+    clicks where the menu really paints."""
+    y0 = menu.y + menu.PAD
+    for i, item in enumerate(menu.items):
+        if item is None:
+            y0 += menu.SEP
+            continue
+        if i == index:
+            return y0 + menu.ITEM_H / 2
+        y0 += menu.ITEM_H
+    raise AssertionError("menu has no item at index %d" % index)
+
+
+def _hamburger_click(browser):
+    """Click the centre of the hamburger settings button in the toolbar."""
+    band = browsermod.toes.band_height(browser.chrome_bands())
+    menu_x = browser.canvas.winfo_width() - browsermod.MENU_BTN_W - 8
+    browser._chrome_click(menu_x + browsermod.MENU_BTN_W / 2, band + 60)
+    return menu_x
+
+
+def test_settings_menu_opens_from_hamburger_button():
+    """The hamburger button at the right of the address bar drops the
+    settings menu, right-aligned under the button, with the about pages
+    and the toe hub."""
+    browser = _browser()
+    menu_x = _hamburger_click(browser)
+    menu = browser.context_menu
+    assert menu.open_, "clicking the hamburger did not open the menu"
+    labels = [item[0] for item in menu.items if item is not None]
+    assert labels == ["Bookmarks", "History", "Manage Shoes", "Manage Toes"], (
+        "unexpected settings menu items: %r" % labels)
+    # The menu hangs from the button's right edge, below the toolbar.
+    band = browsermod.toes.band_height(browser.chrome_bands())
+    assert menu.x + menu.width == menu_x + browsermod.MENU_BTN_W, (
+        "the menu is not right-aligned under the hamburger")
+    assert menu.y == band + 74, "the menu is not under the toolbar"
+    # The open menu is drawn again by a chrome repaint: it hangs into the
+    # chrome band, which the repaint wipes first.
+    browser._draw_chrome()
+    assert menu.open_, "a chrome repaint closed the settings menu"
+    print("  menu items: %s, right-aligned under the button"
+          % ", ".join(labels))
+
+
+def test_settings_menu_bookmarks_opens_new_tab():
+    """'Bookmarks' opens the bookmarks about page in a fresh tab."""
+    browser = _browser()
+    _hamburger_click(browser)
+    menu = browser.context_menu
+    browser._context_menu_click(menu.x + 20, _menu_item_y(menu, 0))
+    assert not menu.open_, "choosing an item left the menu open"
+    assert len(browser.tabs) == 2, "Bookmarks did not open a new tab"
+    assert isinstance(browser.active_tab.url, browsermod._BookmarksURL), (
+        "Bookmarks opened %r instead of about:bookmarks"
+        % browser.active_tab.url)
+    print("  Bookmarks -> about:bookmarks in a new tab")
+
+
+def test_settings_menu_manage_toes_opens_the_hub():
+    """'Manage Toes' opens the toe hub in a fresh tab."""
+    browser = _browser()
+    _hamburger_click(browser)
+    menu = browser.context_menu
+    browser._context_menu_click(menu.x + 20, _menu_item_y(menu, 5))
+    assert not menu.open_, "choosing an item left the menu open"
+    assert len(browser.tabs) == 2, "Manage Toes did not open a new tab"
+    assert str(browser.active_tab.url) == "toe://hub", (
+        "Manage Toes opened %r instead of toe://hub" % browser.active_tab.url)
+    print("  Manage Toes -> toe://hub in a new tab")
+
+
+def test_settings_menu_stays_attached_across_a_resize():
+    """Resizing the window re-anchors the open settings menu under the
+    hamburger button, which is pinned to the window's right edge, while a
+    right-click menu stays where its click point put it."""
+    browser = _browser()
+    _hamburger_click(browser)
+    menu = browser.context_menu
+    assert menu.anchor == "burger", \
+        "the settings menu is not marked as burger-anchored"
+    browser.canvas.resize(700, 720)
+    browser._apply_resize()
+    w = browser.canvas.winfo_width()
+    assert menu.x + menu.width == w - 8, (
+        "after a resize the menu sits %dpx from the hamburger's right edge"
+        % (w - 8 - (menu.x + menu.width)))
+    # A right-click menu is anchored to its click point, not the chrome:
+    # a resize must leave it where the user opened it.
+    browser._on_context_menu(Event(x=300, y=300))
+    page_menu = browser.context_menu
+    assert page_menu.open_ and page_menu.anchor is None, \
+        "a right-click menu is not burger-anchored"
+    x_before = page_menu.x
+    y_before = page_menu.y
+    browser.canvas.resize(900, 720)
+    browser._apply_resize()
+    assert (page_menu.x, page_menu.y) == (x_before, y_before), (
+        "a resize moved the right-click menu from its click point")
+    print("  menu re-anchored under the button; right-click menus stay put")
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

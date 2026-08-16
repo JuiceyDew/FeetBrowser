@@ -53,6 +53,7 @@ TAB_WIDTH = 158  # each tab's drawn width
 TAB_GAP = 160  # stride between tab left edges (TAB_WIDTH + 2px gutter)
 TAB_CLOSE_W = 20  # hit width of the per-tab "×" close box
 NEW_TAB_W = 34  # hit width of the "+" new-tab button
+MENU_BTN_W = 26  # hit width of the hamburger settings button
 SCROLLBAR_RIGHT = 10  # the thumb's left edge, measured back from the right
 SCROLLBAR_W = 6  # the thumb's drawn width
 SCROLLBAR_MIN_THUMB = 30  # a thumb shorter than this is too small to grab
@@ -2364,6 +2365,11 @@ class ContextMenu:
         self.width = self.height = 0
         self.hover = -1
         self.open_ = False
+        # What the menu is anchored to, when it hangs off chrome rather
+        # than a click point: "burger" for the settings menu, None for a
+        # right-click menu. A resize moves the thing it hangs off, and the
+        # owner re-anchors only menus that name one.
+        self.anchor = None
 
     def c(self, key):
         """Color from the owning browser's active shoe (or a fallback)."""
@@ -2372,6 +2378,9 @@ class ContextMenu:
     def open(self, x, y, items, canvas_w, canvas_h):
         self.items = items
         self.hover = -1
+        # A fresh open is positioned explicitly; whoever wants the menu
+        # anchored to chrome (the settings menu) re-sets `anchor` itself.
+        self.anchor = None
         font = get_font(12, "normal", "roman", "Helvetica")
         width = 170
         for item in items:
@@ -2392,6 +2401,7 @@ class ContextMenu:
         self.open_ = False
         self.items = []
         self.hover = -1
+        self.anchor = None
 
     def point_in_menu(self, x, y):
         return (self.open_ and self.x <= x <= self.x + self.width
@@ -3097,6 +3107,7 @@ class Browser:
             if tab.nodes:
                 tab.render()
                 tab._clamp_scroll()
+        self._reanchor_menu()
         self.draw()
 
     def _on_down(self, e):
@@ -3477,6 +3488,11 @@ class Browser:
         star_x = 136 + self._toe_buttons_offset()
         if star_x <= x < star_x + 26 and band_h + 48 <= y < band_h + 72:
             self._toggle_bookmark()
+            return
+        # Hamburger settings button (right of the address bar).
+        menu_x = self.canvas.winfo_width() - MENU_BTN_W - 8
+        if menu_x <= x < menu_x + MENU_BTN_W and band_h + 48 <= y < band_h + 72:
+            self._toggle_menu()
             return
         # Address bar.
         if x >= 136 + self._toe_buttons_offset() + 30:
@@ -3926,6 +3942,11 @@ class Browser:
         and the bookmark star)."""
         return 136 + self._toe_buttons_offset() + 30 + 10
 
+    def _address_bar_right(self):
+        """Canvas x where the address bar ends, before the hamburger
+        settings button (8px window margin + the button + a 6px gap)."""
+        return self.canvas.winfo_width() - MENU_BTN_W - 14
+
     def _address_reset_from_tab(self):
         url = str(self.active_tab.url) if \
             (self.active_tab and self.active_tab.url and
@@ -4092,7 +4113,7 @@ class Browser:
         """Horizontal scroll of the address text so the caret stays in view."""
         font = self.chrome_font
         caret_x = _measure(font, self.address_text[:self.address_caret])
-        box_w = max(40, self.canvas.winfo_width() - 8 - self._address_bar_x() - 8)
+        box_w = max(40, self._address_bar_right() - self._address_bar_x() - 8)
         if caret_x < self.address_view:
             self.address_view = max(0, caret_x - 8)
         elif caret_x > self.address_view + box_w:
@@ -4195,6 +4216,51 @@ class Browser:
             self.active_tab.status = "Bookmarked"
         self._save_bookmarks()
         self._draw_chrome()
+
+    def _menu_items(self):
+        """Items for the hamburger settings menu: the about pages and the
+        toe hub, each opening in a fresh tab."""
+        return [
+            ("Bookmarks", lambda: self.new_tab("about:bookmarks"), True),
+            ("History", lambda: self.new_tab("about:history"), True),
+            None,
+            ("Manage Shoes", lambda: self.new_tab("about:shoes"), True),
+            None,
+            ("Manage Toes", lambda: self.new_tab("toe://hub"), True),
+        ]
+
+    def _toggle_menu(self):
+        """Open (or close) the hamburger settings menu under its button."""
+        if self.context_menu.open_:
+            self.context_menu.close()
+            self.draw()
+            return
+        w = self.canvas.winfo_width()
+        menu_x = w - MENU_BTN_W - 8
+        self.context_menu.open(menu_x + MENU_BTN_W, 0, self._menu_items(),
+                               w, self.canvas.winfo_height())
+        self.context_menu.anchor = "burger"
+        self._reanchor_menu()
+        self.draw()
+
+    def _reanchor_menu(self):
+        """Put the open settings menu back under the hamburger button.
+
+        The button is pinned to the right edge of the window, so a resize
+        moves it out from under the menu; right-click menus are anchored to
+        their click point and never move. One rule for both places the menu
+        is positioned (open and re-anchor) keeps them from drifting apart.
+        """
+        menu = self.context_menu
+        if not menu.open_ or menu.anchor != "burger":
+            return
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        menu_x = w - MENU_BTN_W - 8
+        menu.x = max(2, min(menu_x + MENU_BTN_W - menu.width,
+                            w - menu.width - 2))
+        menu.y = max(2, min(toes.band_height(self.chrome_bands()) + 74,
+                            h - menu.height - 2))
 
     def _history_snapshot(self):
         tab = self.active_tab
@@ -4465,6 +4531,9 @@ class Browser:
         # panel is mistaken for chrome and wiped by the next chrome repaint.
         self.downloads_panel.draw(self.canvas)
         self._draw_select_popup()
+        # The settings menu hangs off the toolbar into the chrome band, so a
+        # chrome repaint would paint over it; draw it back on top.
+        self.context_menu.draw(self.canvas)
 
     def _repaint_selection(self):
         """Redraw just the selection highlight layer. The page behind the
@@ -4557,9 +4626,11 @@ class Browser:
         btn(136 + self._toe_buttons_offset(), "★" if marked else "☆",
             bool(tab))
 
-        # Address bar (after the toe buttons and bookmark star).
+        # Address bar (after the toe buttons and bookmark star), ending
+        # before the hamburger settings button.
         addr_x = 136 + self._toe_buttons_offset() + 30
-        c.create_rectangle(addr_x, top + 48, c.winfo_width() - 8, top + 72,
+        c.create_rectangle(addr_x, top + 48, self._address_bar_right(),
+                           top + 72,
                            outline=self.c("addr_focus_border"
                                           if self.focus == "address"
                                           else "addr_border"),
@@ -4578,13 +4649,23 @@ class Browser:
             c.create_text(addr_x + 10, top + 60, text=url, anchor="w",
                           font=self.chrome_font, fill=self.c("addr_text"))
 
+        # Hamburger settings button (right of the address bar).
+        btn_x = self.canvas.winfo_width() - MENU_BTN_W - 8
+        c.create_rectangle(btn_x, top + 48, btn_x + MENU_BTN_W, top + 72,
+                           outline=self.c("button_border"),
+                           fill=self.c("button_bg"), width=1)
+        for bar_y in (54, 60, 66):
+            c.create_rectangle(btn_x + 6, top + bar_y, btn_x + MENU_BTN_W - 6,
+                               top + bar_y + 2, fill=self.c("button_glyph"),
+                               width=0)
+
     def _draw_address_editor(self, c, addr_x, top):
         """Paint the focused address bar: text (with horizontal scroll),
         selection highlight, and the caret."""
         font = self.chrome_font
         text = self.address_text
         x0 = addr_x + 10
-        x1 = c.winfo_width() - 16
+        x1 = self._address_bar_right() - 8
         if x1 - x0 < 30:
             x1 = x0 + 30
         sel = self._address_selection()
