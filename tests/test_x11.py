@@ -246,6 +246,12 @@ def test_a_release_cannot_be_caught_by_a_typing_binding():
     assert "<Left>" not in names
 
 
+def test_the_window_icon_is_a_cardinal_header_followed_by_argb_pixels():
+    rgba = bytes((0x11, 0x22, 0x33, 0x44, 0xFF, 0x00, 0x00, 0x80))
+    got = x11.net_wm_icon(2, 1, rgba)
+    assert got == [2, 1, 0x44112233, 0x80FF0000]
+
+
 # -- connecting ------------------------------------------------------------
 
 class _Refusing:

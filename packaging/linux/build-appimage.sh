@@ -273,13 +273,13 @@ RPATH
 # -- 8. icon, desktop entry, AppRun ----------------------------------------
 step "icon"
 ICONS="$APPDIR/usr/share/icons/hicolor"
-# Resampled from the one artwork file, packaging/art/feet.png, which is the
-# same source the Windows .ico and the macOS iconset come from. The script is
-# pure standard library, so it runs on the plain CPython building the bundle.
-PYTHONPATH="$SITE" "$PY" "$SRC/packaging/linux/make_icon.py" "$WORK/icons"
+# The artwork lives once, as the shipped feetbrowser/icon.png, and the hicolor
+# PNGs are committed alongside it at the sizes below -- nothing generates them
+# at build time any more, so an offline build cannot fall over on the icon.
 for size in 256 128 64 48; do
   mkdir -p "$ICONS/${size}x${size}/apps"
-  cp "$WORK/icons/feetbrowser-$size.png" "$ICONS/${size}x${size}/apps/feetbrowser.png"
+  cp "$SRC/packaging/linux/icons/feetbrowser-$size.png" \
+     "$ICONS/${size}x${size}/apps/feetbrowser.png"
 done
 cp "$ICONS/256x256/apps/feetbrowser.png" "$APPDIR/feetbrowser.png"
 cp "$APPDIR/feetbrowser.png" "$APPDIR/.DirIcon"

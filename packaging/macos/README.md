@@ -191,12 +191,11 @@ so it is not mistaken for a bundling mistake.
 
 ### The icon
 
-The artwork lives once, as `packaging/art/feet.png`, and `icon.py` resamples
-it to the ten iconset PNGs -- pure standard library, since macOS packaging
-runs on the system Python that cannot import the browser's engine. Shrinking
-is an area average of the source, so the 16pt icon is a fair sample of the
-whole mark rather than one pixel in every N. `iconutil` turns the result
-into `FeetBrowser.icns`.
+The artwork lives once, as the shipped `feetbrowser/icon.png`, and the ten
+iconset PNGs in `packaging/macos/FeetBrowser.iconset/` are committed resamples
+of it -- nothing generates them at build time. Shrinking is an area average of
+the source, so the 16pt icon is a fair sample of the whole mark rather than
+one pixel in every N. `iconutil` turns the iconset into `FeetBrowser.icns`.
 
 ## Universal binary
 

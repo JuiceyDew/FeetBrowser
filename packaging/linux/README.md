@@ -242,13 +242,13 @@ that has no Python, and it is useful for debugging a bundle in the field.
 
 ## The icon
 
-The artwork lives once, as `packaging/art/feet.png`, and every platform's icon
-is a resample of it: the Windows `.ico`, the macOS iconset, and these hicolor
-PNGs. `packaging/linux/make_icon.py` decodes that one PNG and area-averages it
-down to each of the four sizes, pure standard library, so there is no second
-copy of the art anywhere and no image library to import. Shrinking is a fair
-sample of the whole mark rather than one pixel in every N, so the 48-pixel
-menu icon stays legible.
+The artwork lives once, as the shipped `feetbrowser/icon.png`, and every
+platform's icon is a resample of it: the Windows `.ico`, the macOS iconset,
+and these hicolor PNGs. The four hicolor PNGs are committed in
+`packaging/linux/icons/` at the sizes the theme wants -- nothing generates
+them at build time. They were area-averaged down from the art (a fair sample
+of the whole mark rather than one pixel in every N), so the 48-pixel menu icon
+stays legible.
 
 ## Building it
 

@@ -449,12 +449,12 @@ echo "$roots root certificates"
 
 # -- 8. the icon -------------------------------------------------------------
 #
-# Resampled from the one artwork file, packaging/art/feet.png, the same source
-# the Windows .ico and the Linux hicolor PNGs come from. Pure standard
-# library, so it runs on the system Python that builds the bundle.
+# The artwork lives once, as the shipped feetbrowser/icon.png, and the iconset
+# PNGs are committed at the sizes iconutil wants -- nothing generates them at
+# build time any more, so an offline build cannot fall over on the icon.
 
 say "icon"
-PYTHONPATH="$applib" "$pybin" "$here/icon.py" "$work/FeetBrowser.iconset"
+cp -R "$here/FeetBrowser.iconset" "$work/FeetBrowser.iconset"
 iconutil -c icns "$work/FeetBrowser.iconset" \
   -o "$contents/Resources/FeetBrowser.icns"
 

@@ -649,6 +649,20 @@ def xft_dpi(resources):
     return None
 
 
+def net_wm_icon(width, height, rgba):
+    """The CARDINAL array ``_NET_WM_ICON`` wants, from a decoded PNG.
+
+    The property is a width, a height and then one ``0xAARRGGBB`` pixel per
+    RGBA quadruple, all as 32-bit cardinals, which is the format that has to
+    be spelled out here because ctypes has no unsigned 32-bit by default.
+    """
+    pixels = [width, height]
+    for i in range(0, len(rgba), 4):
+        r, g, b, a = rgba[i:i + 4]
+        pixels.append((a << 24) | (r << 16) | (g << 8) | b)
+    return pixels
+
+
 # -- loading ---------------------------------------------------------------
 
 def _load():
@@ -880,8 +894,8 @@ def _open_display():
     _state.update(display=display, screen=screen, visual=visual, depth=depth,
                   format=fmt, root=x11.XRootWindow(display, screen))
     for name in ("WM_PROTOCOLS", "WM_DELETE_WINDOW", "UTF8_STRING",
-                 "CLIPBOARD", "TARGETS", "TEXT", "_NET_WM_NAME",
-                 "FEETBROWSER_SELECTION"):
+                 "CLIPBOARD", "TARGETS", "TEXT", "_NET_WM_NAME", "CARDINAL",
+                 "_NET_WM_ICON", "FEETBROWSER_SELECTION"):
         _state[name] = int(x11.XInternAtom(display, name.encode(), False))
     return display
 
@@ -978,6 +992,7 @@ class X11Window(Window):
         x11.XSetWMProtocols(display, self._window, protocols, 1)
         self._gc = x11.XCreateGC(display, self._window, 0, None)
         self._apply_hints()
+        self._set_icon()
         self.on_title_changed(title)
         if QUIET:
             # Override-redirect takes the window out of the window manager's
@@ -1287,6 +1302,40 @@ class X11Window(Window):
         x11.XChangeProperty(self._display, self._window, _state["_NET_WM_NAME"],
                             _state["UTF8_STRING"], 8, PROP_MODE_REPLACE, raw,
                             len(raw))
+        x11.XFlush(self._display)
+
+    def _set_icon(self):
+        """Put the bundled art into ``_NET_WM_ICON``, so a window manager has
+        something better than the generic 'this is a program' icon.
+
+        The browser ships as ``feetbrowser/icon.png`` next to this module, the
+        same artwork the Windows and macOS bundles draw from. It is decoded at
+        runtime -- the server gets one canonical 256x256 image and scales it,
+        which is what the WM does with the property whatever size is asked for.
+        If the art is somehow missing or unreadable, the window is created
+        without an icon rather than the window creation failing.
+        """
+        if self._closed:
+            return
+        try:
+            from . import imagecodec
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "icon.png")
+            with open(path, "rb") as f:
+                width, height, rgba = imagecodec.decode_png(f.read())
+        except (OSError, imagecodec.ImageError):
+            return
+        x11 = _libs["x11"]
+        cardinals = net_wm_icon(width, height, rgba)
+        # Format 32 means one long per element -- 8 bytes on a 64-bit build,
+        # even though the property values themselves never exceed 32 bits --
+        # so the buffer has to be sized and typed as longs or Xlib reads past
+        # the end of it.
+        data = (ctypes.c_ulong * len(cardinals))(*cardinals)
+        x11.XChangeProperty(
+            self._display, self._window, _state["_NET_WM_ICON"],
+            _state["CARDINAL"], 32, PROP_MODE_REPLACE,
+            ctypes.cast(data, ctypes.c_char_p), len(cardinals))
         x11.XFlush(self._display)
 
     def on_destroy(self):
