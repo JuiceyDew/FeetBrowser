@@ -36,6 +36,7 @@ from .layout import DocumentLayout, paint_tree, get_font, _measure, \
 from .selection import Index as SelectionIndex, Selection, \
     contrasting_text_color
 from . import shoes as shoes
+from . import settings as settings
 from . import downloads as downloads
 from . import media
 from . import arch
@@ -57,6 +58,8 @@ MOMENTUM_STOP = 1.0  # px per frame; below this the coast gives up
 MOMENTUM_SETTLE_MS = 45  # no new notch in this long -> start coasting
 MOMENTUM_GAIN = 0.012  # coast seed, as a fraction of the flick's speed
 MOMENTUM_MAX = 40.0  # px per frame the coast starts at, at most
+RANGE_GLIDE_MS = 16  # per-frame delay while the thumb glides to a press
+RANGE_GLIDE_FRAMES = 8  # frames the glide takes (about an eighth of a second)
 CHROME_HEIGHT = 80  # tabs + address bar
 LOG_HEIGHT = 16  # slim strip under the toolbar reporting load errors
 TAB_LEFT = 8  # first tab's left edge on the tab strip
@@ -2055,6 +2058,11 @@ class Tab:
                 return None
             self._focus(control)
             return SelectAction(control, rect)
+        if itype == "range":
+            # A range is grabbed by _press_range on the browser, which owns
+            # the drag gesture; a bare click without a press flow does not
+            # arrive here. Nothing to focus, nothing to submit.
+            return None
         # Focusable field.
         self._focus(control)
         return None
@@ -2076,6 +2084,20 @@ class Tab:
         for lx, ty, rx, by, other in self.document.input_boxes:
             if other is node:
                 return (lx, ty, rx, by)
+        return None
+
+    def _range_rect_at(self, x, y):
+        """(node, lx, ty, rx, by) for a range input whose box covers (x, y),
+        in page coordinates, or None when the point is not on a range."""
+        if not self.document:
+            return None
+        for lx, ty, rx, by, other in self.document.input_boxes:
+            if other.tag != "input":
+                continue
+            if (other.attributes.get("type", "text").lower() != "range"):
+                continue
+            if lx <= x <= rx and ty <= y <= by:
+                return (other, lx, ty, rx, by)
         return None
 
     def _clear_radio_group(self, radio):
@@ -3176,6 +3198,9 @@ class Browser:
         # Shoes theme: the active color palette for the chrome.
         self.shoe = shoes.load()
         self.theme = shoes.merge(shoes.resolve(self.shoe))
+        # Browser settings: search engine, scroll speed, momentum, and the
+        # rest, loaded once from ~/.feetbrowser_settings.json.
+        self.settings = settings.load()
         self.address_caret = 0
         self.address_sel = None  # (start, end) while selecting, else None
         self.address_view = 0  # horizontal scroll offset in px
@@ -3186,6 +3211,17 @@ class Browser:
         # The tab being dragged along the tab strip, or None between
         # gestures. See _TabDrag: the reorder itself only happens on the drop.
         self._tab_drag = None
+        # A <input type=range> being dragged: the (node, thumb center x).
+        # None between gestures.
+        self._range_grab = None
+        # Where a grabbed range's thumb is headed: the target fraction the
+        # press (or last drag) aimed for. _commit_range lands on it snapped
+        # to step, even when a press was released before the glide finished.
+        self._range_target = 0.0
+        # The glide itself: (start frac, target frac, progress 0..1) plus the
+        # pending `after` handle that advances it, both None when still.
+        self._range_glide = None
+        self._range_anim = None
         self._resize_after = None
         self._last_size = (WIDTH, HEIGHT)
         # Multi-click tracking for word/line selection. No platform backend
@@ -3266,8 +3302,8 @@ class Browser:
         w.bind("<Control-Home>", self._on_home_key)
         w.bind("<Control-End>", self._on_end_key)
         w.bind("<MouseWheel>", self._on_wheel)
-        w.bind("<Button-4>", lambda e: self._scroll(-SCROLL_STEP))
-        w.bind("<Button-5>", lambda e: self._scroll(SCROLL_STEP))
+        w.bind("<Button-4>", lambda e: self._scroll(-self.scroll_step()))
+        w.bind("<Button-5>", lambda e: self._scroll(self.scroll_step()))
         w.bind("<Button-1>", self._on_click)
         w.bind("<B1-Motion>", self._on_drag)
         w.bind("<ButtonRelease-1>", self._on_release)
@@ -3465,14 +3501,14 @@ class Browser:
             return "break"
         if self.focus == "address":
             return
-        self._scroll(SCROLL_STEP)
+        self._scroll(self.scroll_step())
 
     def _on_up(self, e):
         if self._select_popup_move(-1) or self._listbox_move(-1):
             return "break"
         if self.focus == "address":
             return
-        self._scroll(-SCROLL_STEP)
+        self._scroll(-self.scroll_step())
 
     def _select_popup_move(self, delta):
         """Walk an open drop-down's highlight; True when the key was ours."""
@@ -3533,15 +3569,17 @@ class Browser:
         return "break"
 
     def _on_wheel(self, e):
+        step = self.scroll_step()
         delta = -e.delta if abs(e.delta) < 30 \
-            else -int(e.delta / 30) * SCROLL_STEP
+            else -int(e.delta / 30) * step
         if self._listbox_wheel(getattr(e, "x", -1), getattr(e, "y", -1), delta):
             return
         self._scroll(delta)
         # A wheel turn arms the coast: if no new notch lands within a
         # settle window, the flick feeds the page on and decays.
-        self._momentum_job = self.window.after(
-            MOMENTUM_SETTLE_MS, self._momentum_settle)
+        if self.settings.get("momentum", True):
+            self._momentum_job = self.window.after(
+                MOMENTUM_SETTLE_MS, self._momentum_settle)
 
     def _momentum_settle(self):
         """Turn the tracked wheel velocity into a coasting animation.
@@ -3555,11 +3593,20 @@ class Browser:
             self._momentum_job = self.window.after(
                 MOMENTUM_SETTLE_MS, self._momentum_settle)
             return
+        if not self.settings.get("momentum", True):
+            self._momentum_job = None
+            return
         speed = self._scroll_velocity
         if not self.active_tab or not speed:
             self._momentum_job = None
             return
-        seed = min(abs(speed) * MOMENTUM_GAIN, MOMENTUM_MAX)
+        strength = self.settings.get("momentum_strength", 100) / 100.0
+        gain = MOMENTUM_GAIN * strength
+        ceiling = MOMENTUM_MAX * strength
+        seed = min(abs(speed) * gain, ceiling)
+        if seed < MOMENTUM_STOP:
+            self._momentum_job = None
+            return
         self._coast(seed if speed > 0 else -seed)
 
     def _coast(self, speed):
@@ -3687,6 +3734,11 @@ class Browser:
             self._navigate(self.active_tab, dest)
         else:
             node = self.active_tab._node_at(e.x, e.y - self.chrome_height())
+            # Pressing a <input type=range> grabs it: the thumb follows the
+            # pointer for the rest of the gesture and the value is committed
+            # on release (a change event, so scripts see it).
+            if self._press_range(e.x, e.y - self.chrome_height()):
+                return
             if self.active_tab._hit_control(node):
                 # A form control activation (checkbox, field focus, select)
                 # already re-rendered the page; repaint the page layer now
@@ -3787,6 +3839,10 @@ class Browser:
             self._scroll_grab = None
             self._drag_moved = False
             return
+        if self._range_grab is not None:
+            self._commit_range()
+            self._drag_moved = False
+            return
         if self.focus == "address":
             return
         tab = self.active_tab
@@ -3824,6 +3880,12 @@ class Browser:
             # went to, so e.y may be above the track or below the window.
             self._drag_moved = True
             self._scrollbar_drag_to(e.y)
+            return
+        if self._range_grab is not None:
+            # A grabbed range follows the pointer on every event, wherever
+            # it has got to, so the thumb stays under the cursor.
+            self._drag_moved = True
+            self._range_drag_to(e.x)
             return
         if self.focus == "address" and e.x >= self._address_bar_x() - 10:
             self._drag_moved = True
@@ -3942,7 +4004,10 @@ class Browser:
             toes.dispatch(self.toe_contexts, "on_motion", doc_x, doc_y)
             href = self.active_tab.link_at(doc_x, doc_y)
             self.canvas.config(cursor="hand2" if href else "")
-            new_status = href or str(self.active_tab.url or "")
+            if self.settings.get("show_link_preview", True):
+                new_status = href or str(self.active_tab.url or "")
+            else:
+                new_status = ""
             if new_status != self.active_tab.status:
                 self.active_tab.status = new_status
                 self._draw_status()
@@ -4571,8 +4636,9 @@ class Browser:
                                  active=lambda: self.shoe)
             else:
                 if not self._looks_like_url(query):
-                    query = "https://duckduckgo.com/html/?q=" + \
-                        query.replace(" ", "+")
+                    query = settings.search_url(
+                        self.settings.get("search_engine", "duckduckgo"),
+                        query)
                 elif "://" not in query and not query.startswith(
                         ("file:", "data:", "view-source:", "about:")):
                     query = "https://" + query
@@ -4644,6 +4710,7 @@ class Browser:
         """Items for the hamburger settings menu: the about pages and the
         toe hub, each opening in a fresh tab."""
         return [
+            ("Settings", lambda: self.new_tab("about:settings"), True),
             ("Bookmarks", lambda: self.new_tab("about:bookmarks"), True),
             ("History", lambda: self.new_tab("about:history"), True),
             ("Downloads", self._toggle_downloads, True),
@@ -4737,6 +4804,17 @@ class Browser:
             return _ShoesApplyURL(text[len("about:shoes/"):],
                                   apply=self.apply_shoe, theme=self.theme,
                                   active=active)
+        if text == "about:settings":
+            return _SettingsURL(settings_provider=lambda: self.settings,
+                                apply=self._apply_setting, theme=self.theme,
+                                active=active)
+        if text.startswith("about:settings/"):
+            rest = text[len("about:settings/"):]
+            key, _, value = rest.partition("/")
+            return _SettingsApplyURL(key, value,
+                                     settings_provider=lambda: self.settings,
+                                     apply=self._apply_setting,
+                                     theme=self.theme, active=active)
         return raw
 
     @staticmethod
@@ -4917,6 +4995,30 @@ class Browser:
         self.theme = shoes.merge(shoes.resolve(self.shoe))
         shoes.save(self.shoe)
         self._repaint_needed = True
+
+    def scroll_step(self):
+        """Pixels per wheel notch / arrow key, from the saved settings."""
+        return int(self.settings.get("scroll_speed", SCROLL_STEP))
+
+    def _apply_setting(self, key, value):
+        """Persist a browser setting and apply its side effects live."""
+        setting = settings.by_key(key)
+        if setting is None:
+            return
+        value = setting.coerce(value)
+        self.settings[key] = value
+        settings.save({key: value})
+        if key == "search_engine":
+            pass  # read again at the next address-bar search
+        elif key == "scroll_speed":
+            pass  # read again on the next scroll
+        elif key == "momentum":
+            if not value:
+                self._cancel_momentum()
+        elif key == "momentum_strength":
+            pass  # read again when the next coast starts
+        elif key == "show_link_preview":
+            pass  # read again on the next hover
         # Re-render internal pages (welcome/shoes/bookmarks/history) so their
         # themed colors update too.
         internal = (_AboutURL, _BookmarksURL, _HistoryURL, _ShoesURL)
@@ -5273,6 +5375,158 @@ class Browser:
         self.active_tab.set_scroll(offset)
         self._draw_scrollbar()
 
+    # -- <input type=range> dragging --------------------------------------
+
+    def _press_range(self, x, y):
+        """Start dragging a range input whose box the press landed in.
+
+        True when the press was a range's and nothing else should handle it.
+        The thumb glides to the press point over a few frames rather than
+        snapping there, and the value is committed on release.
+        """
+        if not self.active_tab:
+            return False
+        rect = self.active_tab._range_rect_at(x, y)
+        if rect is None:
+            return False
+        node, lx, ty, rx, by = rect
+        self._cancel_momentum()
+        self._cancel_range_glide()
+        self._range_grab = (node, lx, rx)
+        self._range_target = self._range_frac(x)
+        start = self._range_frac_from_value(node)
+        if abs(self._range_target - start) >= 0.02:
+            self._range_glide = (start, self._range_target, 0.0)
+            self._range_anim = self.window.after(
+                RANGE_GLIDE_MS, self._range_glide_tick)
+        return True
+
+    def _range_frac(self, x):
+        """The grabbed range's fraction under pointer x."""
+        if self._range_grab is None:
+            return 0.0
+        node, lx, rx = self._range_grab
+        if rx <= lx:
+            return 0.0
+        return max(0.0, min(1.0, (x - lx) / (rx - lx)))
+
+    def _range_frac_from_value(self, node):
+        """The fraction the node's current value sits at on the track."""
+        try:
+            lo = float(node.attributes.get("min", 0))
+            hi = float(node.attributes.get("max", 100))
+        except ValueError:
+            lo, hi = 0.0, 100.0
+        span = (hi - lo) or 1.0
+        try:
+            cur = float(field_value(node) or lo)
+        except ValueError:
+            cur = lo
+        return max(0.0, min(1.0, (cur - lo) / span))
+
+    def _range_glide_tick(self):
+        """Advance a thumb glide one frame, then reschedule until it lands."""
+        self._range_anim = None
+        if self._range_grab is None:
+            self._range_glide = None
+            return
+        if self._range_glide is None:
+            return
+        node, _lx, _rx = self._range_grab
+        start, target, t = self._range_glide
+        t += 1.0 / RANGE_GLIDE_FRAMES
+        if t >= 1.0:
+            self._range_glide = None
+            frac = target
+        else:
+            self._range_glide = (start, target, t)
+            # Ease out of the old spot and glide into the new one.
+            eased = 1.0 - (1.0 - t) ** 3
+            frac = start + (target - start) * eased
+            self._range_anim = self.window.after(
+                RANGE_GLIDE_MS, self._range_glide_tick)
+        self._range_drag_to_frac(node, frac)
+
+    def _cancel_range_glide(self):
+        if self._range_anim is not None:
+            self.window.after_cancel(self._range_anim)
+            self._range_anim = None
+        self._range_glide = None
+
+    def _range_drag_to_frac(self, node, frac):
+        """Set a grabbed range's value from a track fraction, updating the
+        live readout beside the slider as it goes."""
+        try:
+            lo = float(node.attributes.get("min", 0))
+            hi = float(node.attributes.get("max", 100))
+        except ValueError:
+            lo, hi = 0.0, 100.0
+        span = (hi - lo) or 1.0
+        value = lo + frac * span
+        value = max(lo, min(hi, value))
+        node.attributes["value"] = str(int(value))
+        self._update_range_readout(node, int(value))
+        self.active_tab.render()
+        self._draw_page()
+
+    def _range_drag_to(self, x):
+        """Set a grabbed range's value from a pointer x, following it
+        continuously (no step snapping) so the thumb moves smoothly."""
+        if self._range_grab is None:
+            return
+        node, _lx, _rx = self._range_grab
+        self._cancel_range_glide()
+        self._range_target = self._range_frac(x)
+        self._range_drag_to_frac(node, self._range_target)
+
+    def _update_range_readout(self, node, value):
+        """Rewrite the live value readout (and momentum peak, when present)
+        that sits beside a range slider, so the text tracks the thumb."""
+        name = node.attributes.get("name", "")
+        parent = node.parent
+        if not name or parent is None:
+            return
+        for child in getattr(parent, "children", ()):
+            if not isinstance(child, Element):
+                continue
+            if child.attributes.get("id") == f"out-{name}":
+                setting = settings.by_key(name)
+                unit = setting.unit if setting else ""
+                child.children = [Text(f"{value} {unit}".strip(), child)]
+            elif child.attributes.get("class") == "speed":
+                child.children = [Text(
+                    f"peak {settings.momentum_peak(value):.1f} px/frame",
+                    child)]
+
+    def _commit_range(self):
+        """Release of a range drag: persist the value and fire `change`.
+
+        The stored value is snapped back onto the step grid the input
+        declares, so what gets persisted is a real setting value even though
+        the drag (and glide) moved the thumb continuously.
+        """
+        if self._range_grab is None:
+            return
+        node, _lx, _rx = self._range_grab
+        self._range_grab = None
+        self._cancel_range_glide()
+        try:
+            lo = float(node.attributes.get("min", 0))
+            hi = float(node.attributes.get("max", 100))
+        except ValueError:
+            lo, hi = 0.0, 100.0
+        step = float(node.attributes.get("step", 1) or 1)
+        span = (hi - lo) or 1.0
+        value = lo + self._range_target * span
+        if step:
+            value = lo + round((value - lo) / step) * step
+        value = max(lo, min(hi, value))
+        node.attributes["value"] = str(int(value))
+        self._update_range_readout(node, int(value))
+        self.active_tab._dispatch_js_event(node, "change")
+        self.active_tab.render()
+        self._draw_page()
+
     def run(self):
         self.window.update_idletasks()
         self.draw()
@@ -5472,8 +5726,10 @@ class PopupWindow:
 
     def _bind(self):
         self.window.bind("<MouseWheel>", self._on_wheel)
-        self.window.bind("<Button-4>", lambda e: self._scroll(-SCROLL_STEP))
-        self.window.bind("<Button-5>", lambda e: self._scroll(SCROLL_STEP))
+        self.window.bind("<Button-4>",
+                         lambda e: self._scroll(-self.browser.scroll_step()))
+        self.window.bind("<Button-5>",
+                         lambda e: self._scroll(self.browser.scroll_step()))
         self.window.bind("<Button-1>", self._on_click)
         self.window.bind("<Button-3>", self._on_context_menu)
         self.window.bind("<Motion>", self._on_motion)
@@ -5481,7 +5737,7 @@ class PopupWindow:
 
     def _on_wheel(self, e):
         self._scroll(-e.delta if abs(e.delta) < 30
-                     else -int(e.delta / 30) * SCROLL_STEP)
+                     else -int(e.delta / 30) * self.browser.scroll_step())
 
     def _scroll(self, delta):
         self.tab.scroll_by(delta)
@@ -5764,6 +6020,14 @@ def _resolve_internal(url, bookmarks=None, snapshot=None, theme=None,
     if url.startswith("about:shoes/"):
         return _ShoesApplyURL(url[len("about:shoes/"):],
                               apply, theme, active)
+    if url == "about:settings":
+        return _SettingsURL(settings_provider=None, apply=None,
+                            theme=theme, active=active)
+    if url.startswith("about:settings/"):
+        rest = url[len("about:settings/"):]
+        key, _, value = rest.partition("/")
+        return _SettingsApplyURL(key, value, settings_provider=None,
+                                 apply=None, theme=theme, active=active)
     return URL(url) if "://" in url else URL("https://" + url)
 
 
@@ -5906,6 +6170,75 @@ class _ShoesApplyURL:
         return f"about:shoes/{self.name}"
 
 
+class _SettingsURL:
+    """Internal URL for the browser settings page (about:settings)."""
+    view_source = False
+    fragment = ""
+
+    def __init__(self, settings_provider=None, apply=None, theme=None,
+                 active=None):
+        self.settings_provider = settings_provider or (lambda: {})
+        self.apply = apply
+        self.theme = theme
+        self.active = active
+
+    def resolve(self, url):
+        if url == "about:settings":
+            return self
+        if url.startswith("about:settings/"):
+            rest = url[len("about:settings/"):]
+            key, _, value = rest.partition("/")
+            return _SettingsApplyURL(key, value, self.settings_provider,
+                                     self.apply, self.theme, self.active)
+        return _resolve_internal(url, None, None,
+                                 self.theme, self.apply, self.active)
+
+    def request(self, payload=None):
+        values = self.settings_provider()
+        active = self.active() if callable(self.active) else self.active
+        return {}, settings_html(values, self.theme, active), "text/html"
+
+    def __str__(self):
+        return "about:settings"
+
+
+class _SettingsApplyURL:
+    """Internal URL that sets one setting (about:settings/<key>/<value>)."""
+    view_source = False
+    fragment = ""
+
+    def __init__(self, key, value, settings_provider=None, apply=None,
+                 theme=None, active=None):
+        self.key = key
+        self.value = value
+        self.settings_provider = settings_provider or (lambda: {})
+        self.apply = apply
+        self.theme = theme
+        self.active = active
+
+    def resolve(self, url):
+        if url == "about:settings":
+            return _SettingsURL(self.settings_provider, self.apply,
+                                self.theme, self.active)
+        if url.startswith("about:settings/"):
+            rest = url[len("about:settings/"):]
+            key, _, value = rest.partition("/")
+            return _SettingsApplyURL(key, value, self.settings_provider,
+                                     self.apply, self.theme, self.active)
+        return _resolve_internal(url, None, None,
+                                 self.theme, self.apply, self.active)
+
+    def request(self, payload=None):
+        if callable(self.apply):
+            self.apply(self.key, self.value)
+        values = self.settings_provider()
+        active = self.active() if callable(self.active) else self.active
+        return {}, settings_html(values, self.theme, active), "text/html"
+
+    def __str__(self):
+        return f"about:settings/{self.key}/{self.value}"
+
+
 def _page_palette(theme):
     """Map a shoe palette onto the colors used by the internal pages."""
     t = _page_theme(theme)
@@ -6045,9 +6378,9 @@ def welcome_html(theme=None):
 """
 
 
-def shoes_html(theme, active):
-    """Render the Shoes theme picker: one card per shoe, with a swatch strip
-    showing its palette. Clicking a card applies it instantly."""
+def _shoe_cards(theme, active):
+    """The picker's cards: one per shoe, a swatch strip each, the one in use
+    flagged. Shared by the standalone Shoes page and the Settings tab."""
     p = _page_palette(theme)
     cards = []
     for name in shoes.shoe_names():
@@ -6066,7 +6399,14 @@ def shoes_html(theme, active):
             f'<div class="swatches">{swatches}</div>'
             f'<div class="name">{html.escape(name)}{in_use}</div>'
             f'</a></li>')
-    listing = "\n".join(cards)
+    return "\n".join(cards)
+
+
+def shoes_html(theme, active):
+    """Render the Shoes theme picker: one card per shoe, with a swatch strip
+    showing its palette. Clicking a card applies it instantly."""
+    p = _page_palette(theme)
+    listing = _shoe_cards(theme, active)
     return f"""
 <!doctype html>
 <html><head><title>Shoes</title>
@@ -6091,6 +6431,130 @@ def shoes_html(theme, active):
   <p class="sub">Pick a pair. The chrome and built-in pages restyle instantly.</p>
   <ul class="shoes">{listing}</ul>
   <p class="foot">Your choice is saved and used on the next launch.</p>
+</body></html>
+"""
+
+
+def _slider_control(setting, value):
+    """A real <input type=range> for a slider setting.
+
+    The engine paints a track with a thumb the reader drags with the mouse;
+    the value readout sits beside it. Changing the control fires `change`,
+    and the inline handler commits the value by navigating to the setting's
+    apply URL (the same address a tap on a shoe card uses to apply a theme).
+    """
+    readout = (f'<span id="out-{setting.key}" class="val">'
+               f'{value} {setting.unit}</span>')
+    return (f'<input id="{setting.key}" name="{setting.key}" '
+            f'type="range" min="{setting.min}" max="{setting.max}" '
+            f'step="{setting.step}" value="{value}" '
+            f'onchange="apply_setting(\'{setting.key}\')">'
+            + readout)
+
+
+def _toggle_link(setting, value, p):
+    """An on/off slider-style button for a toggle setting."""
+    state = "on" if value else "off"
+    fill = p["accent"] if value else p["border"]
+    text = "ON" if value else "OFF"
+    return (f'<a class="tgl {state}" href="about:settings/{setting.key}/'
+            f'{"off" if value else "on"}" '
+            f'style="display:inline-block;border:1px solid {p["border"]};'
+            f'background:{fill};color:{p["bg"]};padding:4px 14px;'
+            f'font-weight:bold;">{text}</a>')
+
+
+def settings_html(values, theme=None, active=None):
+    """Render the Settings page: search, scrolling, momentum and the rest.
+
+    Every control is a link back into about:settings/<key>/<value>, so a
+    click re-renders the page with the new value already in place, exactly
+    like the Shoes picker applies a theme.
+    """
+    p = _page_palette(theme)
+    rows = []
+    for setting in settings.SETTINGS:
+        value = values.get(setting.key, setting.default)
+        label = html.escape(setting.label)
+        help_ = html.escape(setting.help)
+        if setting.kind == "toggle":
+            control = _toggle_link(setting, value, p)
+        elif setting.kind == "choice":
+            pills = []
+            for opt_val, option_label in setting.options:
+                sel = " selected" if opt_val == value else ""
+                pills.append(
+                    f'<a class="pill{sel}" '
+                    f'href="about:settings/{setting.key}/{opt_val}" '
+                    f'style="display:inline-block;border:1px solid '
+                    f'{p["border"]};background:'
+                    f'{p["accent"] if opt_val == value else p["surface"]};'
+                    f'color:{p["text"]};padding:4px 14px;'
+                    f'margin-right:6px;">{option_label}</a>')
+            control = "".join(pills)
+        else:  # slider
+            speed = ""
+            if setting.key == "momentum_strength":
+                speed = (f' <span class="speed">peak '
+                         f'{settings.momentum_peak(value):.1f} px/frame'
+                         f'</span>')
+            control = (_slider_control(setting, value)
+                       + speed)
+        rows.append(
+            f'<li class="row">'
+            f'<div class="lab"><span class="name">{label}</span>'
+            f'<span class="help">{help_}</span></div>'
+            f'<div class="ctl">{control}</div></li>')
+    listing = "\n".join(rows)
+    theme_cards = ""
+    if active is not None:
+        theme_cards = f"""
+  <h2 class="sec">Theme</h2>
+  <ul class="shoes">{_shoe_cards(theme, active)}</ul>"""
+    return f"""
+<!doctype html>
+<html><head><title>Settings</title>
+<style>
+  body {{ font-family: Helvetica; margin: 60px; color: {p['text']};
+         background: {p['bg']}; }}
+  h1 {{ font-size: 40px; color: {p['accent']}; }}
+  h2.sec {{ font-size: 24px; color: {p['accent']}; margin-top: 36px; }}
+  .sub {{ color: {p['muted']}; font-size: 18px; }}
+  ul.rows {{ list-style: none; padding: 0; margin-top: 24px;
+             max-width: 760px; }}
+  li.row {{ background: {p['surface']}; border: 1px solid {p['border']};
+            padding: 14px 18px; margin-bottom: 12px; }}
+  .lab .name {{ font-weight: bold; font-size: 18px; }}
+  .lab .help {{ display: block; color: {p['muted']}; font-size: 14px;
+                margin-top: 2px; }}
+  .ctl {{ margin-top: 10px; }}
+  .speed {{ color: {p['muted']}; font-size: 14px; }}
+  a {{ color: {p['link']}; }}
+  ul.shoes {{ list-style: none; padding: 0; display: flex; flex-wrap: wrap;
+              gap: 16px; margin-top: 16px; }}
+  li.shoe {{ background: {p['surface']}; border: 2px solid {p['border']};
+             border-radius: 10px; padding: 12px; width: 220px; }}
+  li.shoe.current {{ border-color: {p['accent']}; }}
+  li.shoe a {{ text-decoration: none; color: {p['text']}; }}
+  .swatches {{ display: flex; gap: 4px; margin-bottom: 10px; }}
+  .name {{ font-weight: bold; }}
+  .inuse {{ color: {p['accent']}; font-weight: bold; }}
+  .foot {{ margin-top: 30px; color: {p['muted']}; }}
+</style></head>
+<body>
+  <h1>Settings</h1>
+  <p class="sub">Tune the browser. Every control saves itself the moment
+  you click it.</p>
+  <ul class="rows">{listing}</ul>{theme_cards}
+  <p class="foot">Stored in ~/.feetbrowser_settings.json, alongside any
+  keys other toes keep there.</p>
+<script>
+function apply_setting(id) {{
+  var el = document.getElementById(id);
+  if (!el) return;
+  location.href = "about:settings/" + el.name + "/" + el.value;
+}}
+</script>
 </body></html>
 """
 

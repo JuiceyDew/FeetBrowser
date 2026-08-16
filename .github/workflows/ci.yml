@@ -98,6 +98,9 @@ jobs:
       - name: Shoes tests
         run: $PY tests/test_shoes.py
 
+      - name: Settings tests
+        run: $PY tests/test_settings.py
+
       - name: Toe engine tests
         run: $PY tests/test_toes.py
 

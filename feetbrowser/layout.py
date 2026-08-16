@@ -3583,6 +3583,48 @@ class BlockLayout(LayoutBox):
             self.line_control_h = max(self.line_control_h, h)
             self.cursor_x += w
             return
+        if itype == "range":
+            w = 200
+            if "size" in node.attributes:
+                try:
+                    w = max(60, int(node.attributes["size"]) * 9)
+                except ValueError:
+                    pass
+            w = self._fit_control(w)
+            y = self.cursor_y
+            h = bull + 2
+            try:
+                lo = float(node.attributes.get("min", 0))
+                hi = float(node.attributes.get("max", 100))
+            except ValueError:
+                lo, hi = 0.0, 100.0
+            try:
+                cur = float(field_value(node) or lo)
+            except ValueError:
+                cur = lo
+            span = (hi - lo) or 1.0
+            frac = max(0.0, min(1.0, (cur - lo) / span))
+            track_h = 6
+            track_y = y + h / 2 - track_h / 2
+            self.display_list.append(DrawRect(
+                self.cursor_x, track_y, self.cursor_x + w, track_y + track_h,
+                "#666666"))
+            thumb_r = 7
+            thumb_x = self.cursor_x + w * frac
+            thumb_x = max(self.cursor_x + thumb_r,
+                          min(self.cursor_x + w - thumb_r, thumb_x))
+            self.display_list.append(DrawRect(
+                self.cursor_x, track_y, thumb_x, track_y + track_h,
+                "#1a73e8"))
+            cy = track_y + track_h / 2
+            self.display_list.append(DrawOval(
+                thumb_x - thumb_r, cy - thumb_r, thumb_x + thumb_r,
+                cy + thumb_r, fill="#1a73e8", outline="#999999"))
+            self.input_boxes.append(
+                (self.cursor_x, y, self.cursor_x + w, y + h, node))
+            self.line_control_h = max(self.line_control_h, h)
+            self.cursor_x += w
+            return
         w = 160
         if "size" in node.attributes:
             try:
