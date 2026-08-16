@@ -612,6 +612,43 @@ def key_release_sequences(keysym):
     return ("<KeyRelease-%s>" % keysym, "<KeyRelease>")
 
 
+# X asserts no opinion about how big a pixel is, so 96 is the convention
+# everything else in the ecosystem measures against: Xft.dpi of 192 means a
+# 2x display, and a toolkit that scales does it by that ratio.
+BASELINE_DPI = 96.0
+
+
+def xft_dpi(resources):
+    """The ``Xft.dpi`` setting out of an X resource database dump, or None.
+
+    This is where a scale factor lives on X11. There is no protocol request
+    for "how dense is this display": RANDR reports a physical size in
+    millimetres, which is a different question and famously a lie on half the
+    monitors that answer it, and a laptop panel at 141 real DPI is still meant
+    to be drawn at 1x. What actually decides is a setting the desktop
+    environment writes into the root window's resource database, and every
+    toolkit reads the same one, so a browser that reads it agrees with the
+    rest of the session by construction.
+
+    The database is a flat ``name:\\tvalue`` per line. Lines are matched on
+    the exact resource name -- ``Xft.dpi`` and nothing else, since a wildcard
+    like ``*dpi`` would also catch settings belonging to some other program.
+    A value that is missing, blank or not a number is no answer rather than a
+    wrong one, and the caller falls back.
+    """
+    for line in (resources or "").splitlines():
+        name, sep, value = line.partition(":")
+        if not sep or name.strip() != "Xft.dpi":
+            continue
+        try:
+            dpi = float(value.strip())
+        except ValueError:
+            continue
+        if dpi > 0:
+            return dpi
+    return None
+
+
 # -- loading ---------------------------------------------------------------
 
 def _load():
@@ -714,6 +751,7 @@ def _declare():
           ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
           ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte))]),
         ("XSetErrorHandler", void, [ERROR_HANDLER]),
+        ("XResourceManagerString", ctypes.c_char_p, [Display]),
         ("XFree", cint, [void]),
     ]
     for name, restype, argtypes in signatures:
@@ -848,6 +886,20 @@ def _open_display():
     return display
 
 
+def _display_scale(display):
+    """Device pixels per CSS pixel for this display, or None if it says
+    nothing.
+
+    The string belongs to Xlib and must not be freed; it is also a snapshot,
+    which is why this is called per window rather than cached -- a session
+    where the user changes the setting has a new answer for the next window,
+    and reading it again costs a pointer dereference.
+    """
+    raw = _libs["x11"].XResourceManagerString(display)
+    dpi = xft_dpi(raw.decode("latin-1", "replace") if raw else "")
+    return None if dpi is None else dpi / BASELINE_DPI
+
+
 def _describe_format(display, visual, depth):
     """Read the server's pixel layout rather than assuming the usual one."""
     x11 = _libs["x11"]
@@ -916,8 +968,15 @@ class X11Window(Window):
         self._selection = ""    # what we last put on the clipboard
         self._primary = ""      # ...and on PRIMARY, the mouse selection
         screen = _state["screen"]
+        # X speaks in device pixels throughout -- window sizes, configure
+        # notifications, pointer positions -- so the scale has to be known
+        # before the window exists, and every number crossing this boundary
+        # from here down is converted. It also has to be settled before
+        # anybody makes a canvas, which reads it off us to size its buffer.
+        self.set_scale(_display_scale(display))
+        dev_width, dev_height = self.to_device(self.width, self.height)
         self._window = x11.XCreateSimpleWindow(
-            display, _state["root"], 0, 0, self.width, self.height, 0,
+            display, _state["root"], 0, 0, dev_width, dev_height, 0,
             x11.XBlackPixel(display, screen), x11.XWhitePixel(display, screen))
         if not self._window:
             raise X11Unavailable("the X server would not create a window")
@@ -948,12 +1007,20 @@ class X11Window(Window):
     # -- geometry ----------------------------------------------------------
 
     def _apply_hints(self):
-        """Tell the window manager the size we want and the size we need."""
+        """Tell the window manager the size we want and the size we need.
+
+        In device pixels: a size hint is a promise to the window manager
+        about the geometry it will hand back in ConfigureNotify, and that is
+        the one currency the server has. A minimum stated in CSS pixels on a
+        2x display would let the user drag the window down to half the size
+        the browser said it could survive.
+        """
         hints = XSizeHints()
         hints.flags = P_SIZE | (P_MIN_SIZE if self.min_width or self.min_height
                                 else 0)
-        hints.width, hints.height = self.width, self.height
-        hints.min_width, hints.min_height = self.min_width, self.min_height
+        hints.width, hints.height = self.to_device(self.width, self.height)
+        hints.min_width, hints.min_height = self.to_device(self.min_width,
+                                                           self.min_height)
         _libs["x11"].XSetWMNormalHints(self._display, self._window,
                                        ctypes.byref(hints))
 
@@ -964,7 +1031,8 @@ class X11Window(Window):
         if self._closed:
             return
         x11 = _libs["x11"]
-        x11.XResizeWindow(self._display, self._window, self.width, self.height)
+        dev_width, dev_height = self.to_device(self.width, self.height)
+        x11.XResizeWindow(self._display, self._window, dev_width, dev_height)
         x11.XFlush(self._display)
 
     def minsize(self, width, height):
@@ -992,7 +1060,10 @@ class X11Window(Window):
     def _blit(self):
         """Push the last converted frame at its own size.
 
-        No scaling: X has no stretching blit for images, and the frame or two
+        Which is the right size: the surface is allocated in device pixels, so
+        one pixel of it is one pixel of the window and XPutImage lands them
+        one for one. No scaling: X has no stretching blit for images, and the
+        frame or two
         during a live resize where the surface and the window disagree simply
         leaves a strip of background until the canvas catches up -- which is
         one pump later, because ConfigureNotify asks for a repaint.
@@ -1108,15 +1179,20 @@ class X11Window(Window):
             self._on_selection(event)
 
     def _on_configure(self, event):
-        width, height = int(event.xconfigure.width), \
-            int(event.xconfigure.height)
-        if not width or not height:
+        device = (int(event.xconfigure.width), int(event.xconfigure.height))
+        if not device[0] or not device[1]:
             return
-        if (width, height) != (self.width, self.height):
+        width, height = self.to_css(*device)
+        stale = (self.canvas is not None
+                 and self.canvas.device_size() != device)
+        if stale or (width, height) != (self.width, self.height):
             # The base implementation, not ours: the window is already this
             # size, and asking the server to resize it again mid-drag fights
-            # the user's mouse.
-            Window.resize(self, width, height)
+            # the user's mouse. The server's own figure is passed along
+            # rather than re-derived from the CSS size, because at a
+            # fractional scale the round trip does not come back where it
+            # started and the buffer would end a pixel short of the window.
+            Window.resize(self, width, height, device)
         self._repaint = True
 
     def _on_client_message(self, event):
@@ -1155,8 +1231,8 @@ class X11Window(Window):
         if resolved is None:
             return
         keysym_name, char = resolved
-        obj = Event(keysym=keysym_name, char=char, state=state,
-                    x=int(event.xkey.x), y=int(event.xkey.y),
+        x, y = self.to_css(event.xkey.x, event.xkey.y)
+        obj = Event(keysym=keysym_name, char=char, state=state, x=x, y=y,
                     type="<Key>" if pressed else "<KeyRelease>")
         sequences = (key_sequences(keysym_name, state) if pressed
                      else key_release_sequences(keysym_name))
@@ -1167,7 +1243,11 @@ class X11Window(Window):
     def _on_button(self, event, pressed):
         button = int(event.xbutton.button)
         state = modifier_state(event.xbutton.state)
-        x, y = int(event.xbutton.x), int(event.xbutton.y)
+        # The server points at a device pixel; everything above expects the
+        # CSS pixel that contains it. This is the conversion that keeps a
+        # click on a link landing on the link and not a quarter of the way
+        # down the page.
+        x, y = self.to_css(event.xbutton.x, event.xbutton.y)
         delta = wheel_delta(button)
         if delta:
             # A notch is a press and a release. Only the press scrolls, or the
@@ -1185,8 +1265,8 @@ class X11Window(Window):
 
     def _on_motion(self, event):
         name, num = motion_binding(event.xmotion.state)
-        self.dispatch(name, Event(x=int(event.xmotion.x),
-                                  y=int(event.xmotion.y), num=num,
+        x, y = self.to_css(event.xmotion.x, event.xmotion.y)
+        self.dispatch(name, Event(x=x, y=y, num=num,
                                   state=modifier_state(event.xmotion.state),
                                   type=name))
 

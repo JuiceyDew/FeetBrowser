@@ -344,6 +344,160 @@ def test_withdraw_is_not_mistaken_for_the_user_closing_the_window():
         assert win.winfo_exists()
 
 
+# -- dense displays --------------------------------------------------------
+#
+# A build agent runs at 96 DPI with no monitor attached, so the interesting
+# path -- the one every laptop panel takes -- would never be exercised here.
+# FEETBROWSER_SCALE forces it: the window is still created and messaged for
+# real, and every physical pixel below is a pixel Windows agrees exists.
+
+class _DenseSession(_Session):
+    """A live window on a display that claims twice the density.
+
+    Deliberately a small page: the window Windows creates is twice the size
+    in every direction, and an overlapped window is clamped to the desktop
+    on the way up. A build agent's desktop is 1024x768, so 900 CSS pixels
+    would come back as 514 and the test would be measuring the clamp.
+    """
+
+    css = (320, 240)
+
+    def __enter__(self):
+        self.saved = os.environ.get("FEETBROWSER_SCALE")
+        os.environ["FEETBROWSER_SCALE"] = "2"
+        try:
+            self.win = win32.Win32Tk(width=self.css[0], height=self.css[1],
+                                     title="dense")
+            pump(self.win, 6)
+            return self.win
+        except BaseException:
+            self._restore()
+            raise
+
+    def _restore(self):
+        if self.saved is None:
+            os.environ.pop("FEETBROWSER_SCALE", None)
+        else:
+            os.environ["FEETBROWSER_SCALE"] = self.saved
+
+    def __exit__(self, *exc):
+        try:
+            return super().__exit__(*exc)
+        finally:
+            self._restore()
+
+
+def test_a_dense_display_gets_a_window_of_device_pixels():
+    """The client area is asked for in physical pixels, so a 320-CSS-pixel
+    page at 2x needs Windows to hand back 640 of them."""
+    from feetbrowser import canvas as canvasmod
+    with _DenseSession() as win:
+        assert win.scale == 2.0, "scale came back %r" % (win.scale,)
+        assert win._content_size() == (640, 480), \
+            "client area is %r physical pixels" % (win._content_size(),)
+        assert (win.width, win.height) == (320, 240), \
+            "the page is %rx%r CSS pixels" % (win.width, win.height)
+        canvas = canvasmod.Canvas(win, width=320, height=240, bg="#ffffff")
+        canvas.pack()
+        assert canvas.device_size() == (640, 480), \
+            "the buffer is %r" % (canvas.device_size(),)
+        win.present()
+        assert win._frame_dims == (640, 480)
+        assert len(win._frame) == 640 * 480 * 4
+        assert win._bitmap.bmiHeader.biWidth == 640
+        assert win._bitmap.bmiHeader.biHeight == -480
+
+
+def test_a_dense_frame_lands_one_pixel_for_one():
+    """The proof that nothing is stretched: a rectangle whose CSS edge is at
+    10 has to have its physical edge at exactly 20, with the pixel on either
+    side of it the colour that belongs there."""
+    from feetbrowser import canvas as canvasmod
+    with _DenseSession() as win:
+        canvas = canvasmod.Canvas(win, width=320, height=240, bg="#123456")
+        canvas.pack()
+        canvas.create_rectangle(10, 10, 20, 20, fill="#ff0000")
+        win.present()
+        with _MemoryTarget(win, 640, 480) as target:
+            win._blit(target.hdc)
+            # Where the frame came from and where it went, in the message:
+            # a bitmap that stayed black means the blit never landed, which
+            # is a different bug from one that landed in the wrong place.
+            where = "frame %r into a client area of %r" % \
+                (win._frame_dims, win._content_size())
+            assert target.pixel(300, 200) == (0x12, 0x34, 0x56), \
+                "the background is %r -- %s" % \
+                (target.pixel(300, 200), where)
+            assert target.pixel(21, 21) == (0xFF, 0, 0), \
+                "physical 21,21 is %r, inside the square -- %s" % \
+                (target.pixel(21, 21), where)
+            assert target.pixel(39, 39) == (0xFF, 0, 0), \
+                "physical 39,39 is %r; the square stopped short -- %s" % \
+                (target.pixel(39, 39), where)
+            assert target.pixel(41, 41) == (0x12, 0x34, 0x56), \
+                "physical 41,41 is %r; the square overran -- %s" % \
+                (target.pixel(41, 41), where)
+
+
+def test_a_dense_resize_keeps_the_buffer_the_size_of_the_window():
+    from feetbrowser import canvas as canvasmod
+    with _DenseSession() as win:
+        canvas = canvasmod.Canvas(win, width=320, height=240, bg="#ffffff")
+        canvas.pack()
+        seen = []
+        win.bind("<Configure>", lambda e: seen.append((e.width, e.height)))
+        send(win, win32.WM_SIZE, 0, pack(500, 300))
+        assert (win.width, win.height) == (250, 150), \
+            "the page thinks it is %rx%r" % (win.width, win.height)
+        assert canvas.device_size() == (500, 300), \
+            "the buffer is %r, not the client area" % (canvas.device_size(),)
+        assert seen and seen[-1] == (250, 150), \
+            "<Configure> reported %r" % seen
+
+
+def test_a_dense_click_lands_on_the_css_pixel_under_it():
+    """WM_LBUTTONDOWN carries physical pixels. A page that laid itself out in
+    CSS pixels has to be told where the click landed in *those*, or every hit
+    test in the browser is out by the scale factor."""
+    with _DenseSession() as win:
+        seen = []
+        win.bind("<Button-1>", lambda e: seen.append((e.x, e.y)))
+        for x, y in ((0, 0), (1, 1), (240, 80), (639, 479)):
+            send(win, win32.WM_LBUTTONDOWN, 0, pack(x, y))
+        assert seen == [(0, 0), (0, 0), (120, 40), (319, 239)], \
+            "clicks landed at %r" % (seen,)
+
+
+def test_a_dpi_change_resizes_the_buffer_to_match():
+    """Dragging the window to a second monitor: the DPI in wParam is adopted
+    before the move, so the WM_SIZE that SetWindowPos sends back converts the
+    new client size with the new scale rather than the old one."""
+    from feetbrowser import canvas as canvasmod
+    get_window_rect = _extra("user32", "GetWindowRect", win32.BOOL,
+                             [HANDLE, ctypes.POINTER(win32.RECT)])
+    with _Session() as win:
+        canvas = canvasmod.Canvas(win, width=900, height=600, bg="#ffffff")
+        canvas.pack()
+        win.present()
+        before = win.scale
+        rect = win32.RECT()
+        assert get_window_rect(win._hwnd, ctypes.byref(rect))
+        # What Windows itself would suggest for twice the density: the same
+        # top-left corner, twice the size.
+        rect.right = rect.left + 2 * (rect.right - rect.left)
+        rect.bottom = rect.top + 2 * (rect.bottom - rect.top)
+        send(win, win32.WM_DPICHANGED, (192 << 16) | 192,
+             ctypes.cast(ctypes.byref(rect), ctypes.c_void_p).value)
+        assert win.scale == 2.0, "scale came back %r" % (win.scale,)
+        assert canvas.device_size() == win._content_size(), \
+            "the buffer is %r for a client area of %r" % \
+            (canvas.device_size(), win._content_size())
+        # Only if the scale actually moved: an agent already running at 192
+        # DPI would have drawn the first frame correctly to begin with.
+        assert before == 2.0 or canvas.dirty, \
+            "the frame was left as it was drawn for the old density"
+
+
 # -- event translation -----------------------------------------------------
 
 def test_mouse_coordinates_arrive_in_canvas_space():

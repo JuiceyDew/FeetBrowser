@@ -2707,6 +2707,46 @@ def test_key_sequences_are_offered_most_specific_first():
     assert "<Control-ISO_Left_Tab>" in names, names
 
 
+def test_win32_dpi_becomes_a_scale_factor():
+    """The one number the Windows backend derives everything else from.
+    Windows offers fractional scales, so 125% has to come out as 1.25 and not
+    as 1 -- and a failed query, which comes back as zero, has to come out as
+    1.0 rather than dividing by nothing."""
+    from feetbrowser.win32 import scale_for_dpi
+    eq(scale_for_dpi(96), 1.0, "96 DPI is 100%")
+    eq(scale_for_dpi(120), 1.25, "125%")
+    eq(scale_for_dpi(144), 1.5, "150%")
+    eq(scale_for_dpi(192), 2.0, "200%")
+    eq(scale_for_dpi(0), 1.0, "a failed query is not a scale of zero")
+    eq(scale_for_dpi(-96), 1.0)
+    eq(scale_for_dpi(None), 1.0)
+    eq(scale_for_dpi("not a dpi"), 1.0)
+
+
+# -- the X11 backend's DPI query, which is a string parser -----------------
+
+def test_xft_dpi_is_read_out_of_the_resource_database():
+    """X has no request for "how dense is this display", so the scale comes
+    from the setting the desktop environment writes into the root window and
+    every other toolkit reads. Nothing else in the database is an answer."""
+    from feetbrowser.x11 import xft_dpi
+    eq(xft_dpi("Xft.dpi:\t192\n"), 192.0)
+    eq(xft_dpi("Xcursor.size:\t24\nXft.dpi:\t144\nXft.hinting:\t1\n"), 144.0)
+    eq(xft_dpi("Xft.dpi: 96"), 96.0, "no tab, no trailing newline")
+    eq(xft_dpi("Xft.dpi:\t96.5\n"), 96.5, "not necessarily a whole number")
+    # A database that says nothing about DPI, which is every bare X server
+    # and every CI runner, has to be no answer rather than a wrong one.
+    eq(xft_dpi(""), None)
+    eq(xft_dpi(None), None)
+    eq(xft_dpi("Xft.hinting:\t1\n"), None)
+    eq(xft_dpi("Xft.dpi:\n"), None, "a blank value is not a number")
+    eq(xft_dpi("Xft.dpi:\tenormous\n"), None)
+    eq(xft_dpi("Xft.dpi:\t0\n"), None, "zero would be a division by nothing")
+    # Matched on the whole name: another program's dpi setting is not ours.
+    eq(xft_dpi("Emacs.Xft.dpi:\t192\n"), None)
+    eq(xft_dpi("*dpi:\t192\n"), None)
+
+
 def test_win32_module_is_importable_off_windows():
     """gui.platform_root(), pyflakes and this file all import it, so it has
     to load on a machine with no windll at all."""

@@ -334,7 +334,20 @@ impl Surface {
     /// `opaque` promises every alpha byte is 255, which turns the inner loop
     /// into a strided copy with no arithmetic at all -- the difference
     /// between a photo costing microseconds and costing milliseconds.
-    #[pyo3(signature = (data, iw, ih, x, y, opaque = false))]
+    ///
+    /// `dw`/`dh` are the size to draw at, in destination pixels, and default
+    /// to the source size. They are here for HiDPI: an image is the one thing
+    /// on the canvas whose pixels are its own rather than ours, so a 100x100
+    /// picture covering 100 CSS pixels has to cover 200 device pixels on a 2x
+    /// display. Resampling on the way in, rather than rewriting the caller's
+    /// buffer, is what keeps that from needing a cache that goes stale --
+    /// animated GIFs and video rewrite their pixels in place and would
+    /// silently outrun one. The sampling is nearest-neighbour, matching
+    /// `image.resize`, so a picture scaled by CSS and one scaled by the
+    /// display land on the same pixels rather than on two different ideas of
+    /// where a source pixel went.
+    #[pyo3(signature = (data, iw, ih, x, y, opaque = false, dw = None,
+                        dh = None))]
     fn blit_rgba(
         &mut self,
         data: &Bound<'_, PyAny>,
@@ -343,10 +356,23 @@ impl Surface {
         x: &Bound<'_, PyAny>,
         y: &Bound<'_, PyAny>,
         opaque: bool,
+        dw: Option<&Bound<'_, PyAny>>,
+        dh: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let iw = to_int(iw)?;
         let ih = to_int(ih)?;
         if iw <= 0 || ih <= 0 {
+            return Ok(());
+        }
+        let dw = match dw {
+            Some(v) => to_int(v)?,
+            None => iw,
+        };
+        let dh = match dh {
+            Some(v) => to_int(v)?,
+            None => ih,
+        };
+        if dw <= 0 || dh <= 0 {
             return Ok(());
         }
         let data = bytes_arg(data)?;
@@ -354,14 +380,21 @@ impl Surface {
         let (cx0, cy0, cx1, cy1) = self.clip;
         let sx0 = 0.max(cx0 - x);
         let sy0 = 0.max(cy0 - y);
-        let sx1 = iw.min(cx1 - x);
-        let sy1 = ih.min(cy1 - y);
+        let sx1 = dw.min(cx1 - x);
+        let sy1 = dh.min(cy1 - y);
         if sx0 >= sx1 || sy0 >= sy1 {
             return Ok(());
         }
         let count = (sx1 - sx0) as usize;
+        // Destination column to the byte offset of the source pixel it
+        // samples, computed once because it is the same on every row -- and
+        // the identity mapping when nothing is being scaled, which is the
+        // case that has to stay cheap.
+        let xmap: Vec<usize> = (sx0..sx1)
+            .map(|c| ((iw - 1).min(c * iw / dw) * 4) as usize)
+            .collect();
         for row in sy0..sy1 {
-            let src = ((row * iw + sx0) * 4) as usize;
+            let src = ((ih - 1).min(row * ih / dh) * iw * 4) as usize;
             let dst = ((y + row) * self.stride + (x + sx0) * 3) as usize;
             let line = match self.px.get_mut(dst..dst + count * 3) {
                 Some(l) => l,
@@ -369,10 +402,17 @@ impl Surface {
             };
             // An image whose buffer is shorter than its declared size only
             // happens if something lied about it; the pixels we do not have
-            // are left as they were rather than read.
-            let available = data.len().saturating_sub(src) / 4;
-            for col in 0..count.min(available) {
-                let s = src + col * 4;
+            // are left as they were rather than read. `xmap` never
+            // decreases, so testing its last entry answers for the whole row
+            // and the scan only runs for a row that really is short.
+            let room = data.len().saturating_sub(src);
+            let n = if xmap[count - 1] + 4 <= room {
+                count
+            } else {
+                xmap.iter().position(|o| o + 4 > room).unwrap_or(count)
+            };
+            for col in 0..n {
+                let s = src + xmap[col];
                 let d = col * 3;
                 let a = data[s + 3] as i64;
                 if opaque || a >= 255 {

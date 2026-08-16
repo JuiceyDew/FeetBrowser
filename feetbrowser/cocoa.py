@@ -15,6 +15,16 @@ happens here -- Cocoa event types and key codes become ``<Button-1>``,
 Presenting is a CGImage wrapped straight around the framebuffer: our RGB
 bytes are already a valid 24-bit bitmap, so there is no format conversion in
 the frame path, just a data provider handed to an ``NSImageView``.
+
+Cocoa is the one backend where the two coordinate systems are already kept
+apart for us. Everything AppKit reports -- a view's bounds, a mouse location,
+a window frame -- is in points, and a point is exactly what the rest of the
+browser calls a CSS pixel, so no event coordinate is ever converted here. The
+only place the difference surfaces is the frame: on a Retina display one point
+is two device pixels, and the framebuffer is allocated in device pixels, so
+the CGImage is twice the size of the NSImage that carries it. Saying so is the
+whole HiDPI fix -- an NSImage whose size is the image's pixel count claims a
+density of 1 and gets stretched over the backing store, which is soft.
 """
 import ctypes
 import ctypes.util
@@ -274,6 +284,10 @@ class CocoaWindow(Window):
         self._images = []
         self._cursor = None
         self._closed = False
+        # Now that there is a window there is a display behind it, so the
+        # scale is knowable. It has to be settled before anyone makes a
+        # canvas, because the canvas reads it off us to size its buffer.
+        self.set_scale(self._backing_scale())
         _WINDOWS[int(self._window)] = self
 
     def _prepare_cg(self):
@@ -298,6 +312,27 @@ class CocoaWindow(Window):
         bounds = msg_rect(self._view, "bounds")
         return int(round(bounds.size.width)), int(round(bounds.size.height))
 
+    def _backing_scale(self):
+        """Device pixels per point, as the display currently says.
+
+        The window is asked rather than the screen because a window can be
+        dragged from a Retina display to an external one and the answer
+        changes under it; the screen is only the fallback for the moment
+        before the window is on one. `backingScaleFactor` returns a CGFloat,
+        which is a double here and has to be declared as one -- ctypes would
+        otherwise read the integer register, which holds nothing, and every
+        display would look like scale 0.
+        """
+        for receiver in (self._window,
+                         msg(_cls("NSScreen"), "mainScreen")):
+            if not receiver:
+                continue
+            value = msg(receiver, "backingScaleFactor",
+                        restype=ctypes.c_double)
+            if value:
+                return float(value)
+        return 1.0
+
     def resize(self, width, height):
         """Resize from our side, e.g. a geometry() call before the first frame."""
         super().resize(width, height)
@@ -312,10 +347,22 @@ class CocoaWindow(Window):
             argtypes=(NSRect, ctypes.c_bool))
 
     def _sync_size(self):
-        """Pick up a resize the user made by dragging the window edge."""
+        """Pick up a resize the user made by dragging the window edge, and a
+        change of display density under it.
+
+        The scale is polled rather than observed: there is no delegate here to
+        receive `windowDidChangeBackingProperties:`, and a poll once per event
+        drain is a single message send against a value that changes when
+        somebody drags a window between monitors. Reallocating the buffer is
+        enough on its own -- nothing above cares -- but the frame currently on
+        screen was drawn for the old density, so the canvas is marked dirty
+        and the next present redraws it.
+        """
         width, height = self._content_size()
         if (width, height) != (self.width, self.height) and width and height:
             Window.resize(self, width, height)
+        if self.set_scale(self._backing_scale()) and self.canvas is not None:
+            self.canvas.dirty = True
 
     # -- presenting --------------------------------------------------------
 
@@ -341,7 +388,15 @@ class CocoaWindow(Window):
         image = cg.CGImageCreate(surface.width, surface.height, 8, 24,
                                  surface.stride, self._colorspace, 0,
                                  provider, None, False, 0)
-        size = NSSize(float(surface.width), float(surface.height))
+        # An NSImage's size is in points, not pixels, and the difference
+        # between the two is what makes a Retina frame sharp: a 1600x1200
+        # CGImage declared as 800x600 points is a 2x representation that
+        # AppKit draws one image pixel to one device pixel, while the same
+        # CGImage declared as 1600x1200 points is a 1x image that the view
+        # then shrinks -- or, before this buffer was allocated in device
+        # pixels at all, an 800x600 1x image stretched over twice its area,
+        # which was the blur.
+        size = NSSize(surface.width / self.scale, surface.height / self.scale)
         nsimage = msg(msg(_cls("NSImage"), "alloc"), "initWithCGImage:size:",
                       image, size,
                       argtypes=(ctypes.c_void_p, NSSize))

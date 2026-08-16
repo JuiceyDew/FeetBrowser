@@ -217,24 +217,39 @@ class Font:
                 total += w
         return total
 
-    def draw(self, surface, text, x, baseline, fill):
-        """Paint `text`, advancing exactly as `measure` says it will."""
+    def draw(self, surface, text, x, baseline, fill, scale=1.0):
+        """Paint `text` at device coordinates, advancing exactly as `measure`
+        says it will.
+
+        `scale` is device pixels per CSS pixel, and `x`/`baseline` are already
+        in device pixels -- the caller has multiplied them. Everything else in
+        here is a CSS-pixel quantity being converted on the way out: the pen
+        advances by `advance * scale`, so the run occupies exactly the width
+        layout measured, and the glyph is rasterised at `self.size * scale`
+        rather than magnified from a 1x bitmap. That last part is the whole
+        point of the parameter. A 12px glyph blown up to 24 device pixels is
+        the blur we are trying to remove; a glyph outline hinted and filled at
+        24 is a different, sharper bitmap with the curves resolved at the size
+        it is actually shown. Coverage caching still works, because the cache
+        key includes the size, so a page at one scale rasterises each glyph
+        once and reuses it exactly as before.
+        """
         pen = float(x)
         widths = self._widths
+        size = self.size * scale
         for ch in text:
-            face, gid, scale = self.face_for(ch)
+            face, gid, face_scale = self.face_for(ch)
             try:
                 advance = widths[ch]
             except KeyError:
-                advance = face.advance(gid) * scale
+                advance = face.advance(gid) * face_scale
                 widths[ch] = advance
             if not ch.isspace():
-                cov, w, h, left, top = raster.glyph_bitmap(face, self.size,
-                                                           gid)
+                cov, w, h, left, top = raster.glyph_bitmap(face, size, gid)
                 if w:
                     surface.blit_coverage(cov, w, h, int(pen) + left,
                                           int(baseline) + top, fill)
-            pen += advance
+            pen += advance * scale
         return pen - x
 
     def metrics(self, name=None):
@@ -514,8 +529,16 @@ class Canvas:
     """
 
     def __init__(self, master=None, width=800, height=600, bg="white",
-                 background=None, **_ignored):
+                 background=None, scale=None, **_ignored):
         self.master = master
+        # Every coordinate handed to a create_* method is a CSS pixel, and the
+        # framebuffer is in device pixels: `scale` is the ratio between them
+        # and `render` is where it is applied. A canvas with no window over it
+        # -- a test, a toe drawing a thumbnail -- has nobody to ask and draws
+        # at 1:1.
+        if scale is None:
+            scale = getattr(master, "scale", 1.0)
+        self.scale = float(scale) if scale and float(scale) > 0 else 1.0
         self._width = int(width)
         self._height = int(height)
         self.background = color(background or bg) or (255, 255, 255)
@@ -523,8 +546,8 @@ class Canvas:
         self._items = []
         self._by_tag = {}
         self._next_id = 1
-        self.surface = raster.Surface(self._width, self._height,
-                                      self.background)
+        self._device = ()
+        self._reallocate(self._device_for(self._width, self._height))
         # Set by every mutation, cleared by render(). A platform window reads
         # it to skip presenting a frame nothing changed in.
         self.dirty = True
@@ -543,13 +566,61 @@ class Canvas:
     def winfo_reqheight(self):
         return self._height
 
-    def resize(self, width, height):
+    def device_size(self):
+        """The framebuffer's size in device pixels.
+
+        Not the same number as winfo_width()/winfo_height() on a HiDPI
+        display, and deliberately a separate call: everything that positions
+        anything wants the CSS-pixel size, and the two places that want this
+        one are the code that hands the buffer to the operating system and
+        the tests that check it was the right size.
+        """
+        return self._device
+
+    def _device_for(self, width, height):
+        return (max(1, int(round(width * self.scale))),
+                max(1, int(round(height * self.scale))))
+
+    def _reallocate(self, device):
+        if device == self._device:
+            return
+        self._device = device
+        self.surface = raster.Surface(device[0], device[1], self.background)
+        self.dirty = True
+
+    def resize(self, width, height, device=None):
+        """Resize to `width` x `height` CSS pixels.
+
+        `device` is the framebuffer size the platform wants, when it knows it
+        exactly -- see Window.resize. Without it the size is this many CSS
+        pixels scaled and rounded, which is right everywhere the window
+        system is not itself the authority on the answer.
+        """
         width, height = max(1, int(width)), max(1, int(height))
-        if (width, height) == (self._width, self._height):
+        device = (tuple(max(1, int(v)) for v in device) if device
+                  else self._device_for(width, height))
+        if (width, height) == (self._width, self._height) and \
+                device == self._device:
             return
         self._width, self._height = width, height
-        self.surface = raster.Surface(width, height, self.background)
+        self._reallocate(device)
         self.dirty = True
+
+    def set_scale(self, scale, device=None):
+        """Draw at a new device-pixel ratio from the next frame on.
+
+        The retained items are untouched, because they were never in device
+        pixels: they say where things are in CSS pixels and this only changes
+        what that is worth. Returns True when the ratio actually moved.
+        """
+        scale = float(scale) if scale and float(scale) > 0 else 1.0
+        if scale == self.scale:
+            return False
+        self.scale = scale
+        self._reallocate(tuple(max(1, int(v)) for v in device) if device
+                         else self._device_for(self._width, self._height))
+        self.dirty = True
+        return True
 
     def pack(self, **_ignored):
         # Geometry management is a single canvas filling its window, so
@@ -721,11 +792,12 @@ class Canvas:
         Painting the whole retained list each frame is what keeps the model
         honest: overlapping items, deletions and re-inserts all resolve
         correctly without tracking damaged pixels. `region` clips the work
-        to a rectangle when only part of the frame changed.
+        to a rectangle when only part of the frame changed; like every other
+        coordinate here it is in CSS pixels.
         """
         surface = self.surface
         if region:
-            x0, y0, x1, y1 = region
+            x0, y0, x1, y1 = (v * self.scale for v in region)
             saved = surface.set_clip(x0, y0, x1, y1)
             surface.fill_rect(x0, y0, x1, y1, self.background)
         else:
@@ -741,10 +813,16 @@ class Canvas:
     def _paint(self, surface, item):
         kind = item.kind
         opts = item.opts
-        c = item.coords
         if kind == "text":
-            self._paint_text(surface, c, opts)
-        elif kind == "rectangle":
+            # The one item that keeps its CSS-pixel coordinates this far:
+            # anchoring is arithmetic on font metrics, which are measured in
+            # CSS pixels, so it is done there and scaled at the last moment.
+            self._paint_text(surface, item.coords, opts)
+            return
+        scale = self.scale
+        c = item.coords if scale == 1.0 else tuple(v * scale
+                                                   for v in item.coords)
+        if kind == "rectangle":
             x0, y0, x1, y1 = _ordered(c)
             alpha = 128 if opts.get("stipple") else 255
             fill = color(opts.get("fill"))
@@ -755,33 +833,63 @@ class Canvas:
             # `outline=""` or `width=0` is how you decline it -- which is why
             # the absent case has to be told apart from the empty one.
             outline = color(opts["outline"]) if "outline" in opts else (0, 0, 0)
-            width = int(opts.get("width", 1))
+            width = self._stroke(opts.get("width", 1))
             if outline and width:
                 surface.outline_rect(x0, y0, x1, y1, outline, width, alpha)
         elif kind == "line":
             stroke = color(opts.get("fill")) or (0, 0, 0)
-            width = int(opts.get("width", 1))
+            width = self._stroke(opts.get("width", 1))
             for i in range(0, len(c) - 3, 2):
                 surface.draw_line(c[i], c[i + 1], c[i + 2], c[i + 3],
                                   stroke, width)
         elif kind == "image":
             photo = opts.get("image")
             if photo is not None:
-                x, y = c[0], c[1]
-                if opts.get("anchor", "nw") == "center":
-                    x -= photo.width() / 2
-                    y -= photo.height() / 2
-                surface.blit_rgba(photo.rgba, photo.width(), photo.height(),
-                                  x, y, getattr(photo, "opaque", False))
+                self._paint_image(surface, c, opts, photo)
         elif kind == "oval":
-            self._paint_oval(surface, item)
+            self._paint_oval(surface, c, opts)
         elif kind == "arc":
-            self._paint_arc(surface, item)
+            self._paint_arc(surface, c, opts)
         elif kind == "polygon":
             fill = color(opts.get("fill"))
             if fill and len(c) >= 6:
                 points = [(c[i], c[i + 1]) for i in range(0, len(c) - 1, 2)]
                 _fill_polygon(surface, points, fill)
+
+    def _stroke(self, width):
+        """A line width in device pixels: scaled, but never rounded away.
+
+        A hairline is the case that matters. One CSS pixel of border is two
+        device pixels at 2x and one at 1x, and at a fractional scale it is
+        whatever that rounds to -- except zero, which would delete a border
+        the page asked for rather than draw it thin. Declining a border by
+        asking for a width of 0 still works, because 0 comes back as 0.
+        """
+        width = int(width)
+        if width <= 0 or self.scale == 1.0:
+            return width
+        return max(1, int(round(width * self.scale)))
+
+    def _paint_image(self, surface, coords, opts, photo):
+        """Blit a picture, resampled to the device pixels it now covers.
+
+        An image is the one thing on the canvas whose pixels are its own
+        rather than ours: a 100x100 photo is 100x100 CSS pixels, which is
+        200x200 device pixels on a 2x display, so the blit scales it. That is
+        a magnification and it looks like one -- the real fix for a photo is
+        to decode it at the size it will be drawn -- but it puts the picture
+        in the right place at the right size, which is what the rest of the
+        frame is relying on.
+        """
+        width = photo.width() * self.scale
+        height = photo.height() * self.scale
+        x, y = coords[0], coords[1]
+        if opts.get("anchor", "nw") == "center":
+            x -= width / 2
+            y -= height / 2
+        surface.blit_rgba(photo.rgba, photo.width(), photo.height(), x, y,
+                          getattr(photo, "opaque", False),
+                          int(round(width)), int(round(height)))
 
     def _paint_text(self, surface, coords, opts):
         font = opts.get("font")
@@ -799,12 +907,13 @@ class Canvas:
             x -= font.measure(text) / 2
         elif anchor in ("e", "ne", "se"):
             x -= font.measure(text)
+        scale = self.scale
         baseline = top + font.ascent
         for line in str(text).split("\n"):
-            font.draw(surface, line, x, baseline, fill)
+            font.draw(surface, line, x * scale, baseline * scale, fill, scale)
             baseline += font.linespace
 
-    def _paint_oval(self, surface, item):
+    def _paint_oval(self, surface, coords, opts):
         """Fill an ellipse, then stroke its edge.
 
         List markers are what this is for: `list-style-type: disc` is a
@@ -817,15 +926,21 @@ class Canvas:
         go through the supersampled path, which costs a few hundred samples;
         big ones keep the cheap scanline, where a stair-step of one pixel in
         two hundred is invisible anyway.
+
+        `coords` arrives in device pixels, so the limit that picks between
+        the two paths is scaled with them: which shapes are small enough to
+        need the sampled edge is a fact about how big they look, not about
+        how many pixels the display happens to give them.
         """
-        x0, y0, x1, y1 = _ordered(item.coords)
-        fill = color(item.opts.get("fill"))
-        outline = color(item.opts.get("outline"))
+        x0, y0, x1, y1 = _ordered(coords)
+        fill = color(opts.get("fill"))
+        outline = color(opts.get("outline"))
         rx, ry = (x1 - x0) / 2.0, (y1 - y0) / 2.0
         if rx <= 0 or ry <= 0 or not (fill or outline):
             return
-        width = float(item.opts.get("width", 1) or 0) if outline else 0.0
-        if max(x1 - x0, y1 - y0) <= _OVAL_AA_LIMIT:
+        width = (float(opts.get("width", 1) or 0) * self.scale
+                 if outline else 0.0)
+        if max(x1 - x0, y1 - y0) <= _OVAL_AA_LIMIT * self.scale:
             self._paint_oval_aa(surface, x0, y0, x1, y1, fill, outline, width)
             return
         cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
@@ -837,7 +952,7 @@ class Canvas:
                 half = rx * math.sqrt(1.0 - dy * dy)
                 surface.fill_rect(cx - half, y, cx + half, y + 1, fill, 255)
         if outline:
-            self._paint_arc(surface, item)
+            self._paint_arc(surface, coords, opts)
 
     def _paint_oval_aa(self, surface, x0, y0, x1, y1, fill, outline, width):
         """Draw a small ellipse pixel by pixel, each one blended by how much
@@ -861,18 +976,17 @@ class Canvas:
                     surface.fill_rect(x, y, x + 1, y + 1, outline,
                                       int(round((outer - inner) * 255)))
 
-    def _paint_arc(self, surface, item):
+    def _paint_arc(self, surface, coords, opts):
         """Stroke an elliptical arc. Angles are degrees measured
         counter-clockwise from 3 o'clock, and the browser uses this for one
         thing: the loading spinner."""
-        x0, y0, x1, y1 = _ordered(item.coords)
+        x0, y0, x1, y1 = _ordered(coords)
         cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
         rx, ry = (x1 - x0) / 2.0, (y1 - y0) / 2.0
-        opts = item.opts
         stroke = color(opts.get("outline")) or color(opts.get("fill"))
         if not stroke or rx <= 0 or ry <= 0:
             return
-        width = int(opts.get("width", 1))
+        width = self._stroke(opts.get("width", 1))
         start = float(opts.get("start", 0.0))
         extent = float(opts.get("extent", 360.0))
         steps = max(8, int(abs(extent) / 4))

@@ -46,6 +46,42 @@ def _flag(name):
 # unset for the browser itself, where being raised and focused is the point.
 QUIET = _flag("FEETBROWSER_QUIET")
 
+# A scale below this is not a display anybody has, and one above it is a
+# buffer nobody meant to allocate: 8x a 1600-wide window is 160 megabytes a
+# frame. Both ends are here to keep a typo in an environment variable from
+# becoming a rendering bug that looks like a hang.
+SCALE_MIN, SCALE_MAX = 0.25, 8.0
+
+
+def scale_factor(reported=None):
+    """Device pixels per CSS pixel, with the environment having the last word.
+
+    Every layer above this one measures in CSS pixels, because that is what a
+    stylesheet says and what layout computes in. What a display actually has
+    is device pixels, and on a Retina panel there are two of them per CSS
+    pixel in each direction -- so the framebuffer is allocated at this ratio,
+    drawing multiplies by it, and input divides back out by it.
+
+    `reported` is what the platform said, or None when nobody said anything:
+    a headless root, or a window system with no notion of a scale at all.
+    Both end up at 1.0, which is what every backend assumed before this
+    existed and is the only answer that cannot be wrong.
+
+    ``FEETBROWSER_SCALE`` overrides it, because rendering at 2x has to be
+    testable on whatever machine you happen to have -- and, on a display
+    whose scale we read wrongly, it is the way out. A value that is not a
+    usable ratio is ignored rather than obeyed.
+    """
+    for candidate in (os.environ.get("FEETBROWSER_SCALE", "").strip(),
+                      reported):
+        try:
+            value = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if SCALE_MIN <= value <= SCALE_MAX:
+            return value
+    return 1.0
+
 
 def key_sequences(keysym, state):
     """Candidate binding names for a keypress, most specific first.
@@ -117,9 +153,15 @@ class Window:
     frame, because only callbacks already due when the sweep began run in it.
     """
 
-    def __init__(self, width=1000, height=720, title="FeetBrowser"):
+    def __init__(self, width=1000, height=720, title="FeetBrowser",
+                 scale=None):
+        # Everything on a window is CSS pixels: `width`, `height`, `minsize`,
+        # and the x/y on every event that leaves here. `scale` is the only
+        # place device pixels are named, and the canvas is the only thing
+        # that acts on it.
         self.width = int(width)
         self.height = int(height)
+        self.scale = scale_factor(scale)
         self._title = title
         self._bindings = {}
         self._timers = []
@@ -361,14 +403,59 @@ class Window:
     def present(self):
         """Push the canvas surface to the screen."""
 
-    def resize(self, width, height):
+    def resize(self, width, height, device=None):
+        """Take a new size in CSS pixels.
+
+        `device` is that size in device pixels, for the backends that were
+        handed one: a window manager deals in whole physical pixels, and
+        putting that number back through a fractional scale can miss it by
+        one -- which is a column of unpainted background down the edge of the
+        window rather than a rounding detail. Backends that were not told
+        pass nothing and let the canvas work it out.
+        """
         self.width = max(self.min_width, int(width))
         self.height = max(self.min_height, int(height))
         if self.canvas is not None:
-            self.canvas.resize(self.width, self.height)
+            self.canvas.resize(self.width, self.height, device)
         self.dispatch("<Configure>",
                       Event(width=self.width, height=self.height,
                             type="<Configure>"))
+
+    def set_scale(self, scale, device=None):
+        """Adopt a device-pixel ratio the platform has just reported.
+
+        Returns True when it actually changed, which is what tells a backend
+        it owes the screen a fresh frame: the framebuffer underneath has been
+        thrown away and replaced with one of a different size. A window
+        dragged between a laptop panel and an external display does this
+        mid-session, so it cannot be settled once at startup.
+        """
+        scale = scale_factor(scale)
+        if scale == self.scale:
+            return False
+        self.scale = scale
+        if self.canvas is not None:
+            self.canvas.set_scale(scale, device)
+        return True
+
+    def to_css(self, x, y):
+        """A point the platform gave us in device pixels, in CSS pixels.
+
+        Hit testing above here is all in CSS pixels -- link boxes, the tab
+        bar, form controls -- so a backend whose events arrive in physical
+        pixels has to come through here first, or every click on a 2x display
+        lands twice as far from the origin as the user aimed. Cocoa never
+        calls it: its points already are our CSS pixels.
+        """
+        if self.scale == 1.0:
+            return int(x), int(y)
+        return int(x // self.scale), int(y // self.scale)
+
+    def to_device(self, width, height):
+        """A size in CSS pixels as the whole number of device pixels it
+        covers, which is what a window system wants to be told."""
+        return (max(1, int(round(width * self.scale))),
+                max(1, int(round(height * self.scale))))
 
     def on_title_changed(self, title):
         """Platform windows update their titlebar here."""

@@ -1484,6 +1484,259 @@ def test_canvas_arc_strokes_without_filling():
     assert any(p != (255, 255, 255) for p in edge), "arc drew nothing"
 
 
+# -- HiDPI: CSS pixels above, device pixels in the buffer ------------------
+#
+# Everything the browser lays out, hit tests and draws with is a CSS pixel. A
+# display that puts two or three real pixels in each of those is the platform
+# backends' problem and the canvas's, and nowhere else's -- so this is where
+# the arithmetic that separates them is checked, with no display attached.
+# The half that needs a real window (asking the OS what its scale actually
+# is, and getting the frame onto it one pixel for one) is in test_cocoa.py,
+# test_x11.py and test_win32.py.
+
+class _ScaleEnv:
+    """FEETBROWSER_SCALE set for the length of a test, and put back after.
+
+    The variable is read every time a scale is settled rather than once at
+    import, which is what makes it usable for testing at all -- but it also
+    means a test that leaves it set changes every test after it.
+    """
+
+    def __init__(self, value):
+        self.value = value
+
+    def __enter__(self):
+        self.saved = os.environ.get("FEETBROWSER_SCALE")
+        if self.value is None:
+            os.environ.pop("FEETBROWSER_SCALE", None)
+        else:
+            os.environ["FEETBROWSER_SCALE"] = self.value
+
+    def __exit__(self, *_exc):
+        if self.saved is None:
+            os.environ.pop("FEETBROWSER_SCALE", None)
+        else:
+            os.environ["FEETBROWSER_SCALE"] = self.saved
+        return False
+
+
+def test_a_platform_that_says_nothing_is_one_to_one():
+    """The default has to be exactly 1.0, and be the float rather than the
+    int: a machine with no notion of display density, and every X server
+    without an Xft.dpi, arrives here."""
+    from feetbrowser.window import scale_factor
+    with _ScaleEnv(None):
+        assert scale_factor(None) == 1.0
+        assert scale_factor("") == 1.0
+        assert scale_factor("not a number") == 1.0
+        assert scale_factor(0) == 1.0, "a failed query reads as zero"
+        assert scale_factor(2.0) == 2.0
+        assert scale_factor("1.5") == 1.5, "a string from an env var"
+        # Bounded at both ends, because a typo should not allocate a buffer
+        # measured in gigabytes or one measured in nothing.
+        assert scale_factor(64.0) == 1.0
+        assert scale_factor(0.01) == 1.0
+        assert scale_factor(-2.0) == 1.0
+
+
+def test_the_environment_overrides_what_the_platform_reports():
+    from feetbrowser.window import scale_factor
+    with _ScaleEnv("3"):
+        assert scale_factor(2.0) == 3.0, "the override did not win"
+        assert scale_factor(None) == 3.0
+    with _ScaleEnv("rubbish"):
+        assert scale_factor(2.0) == 2.0, \
+            "an unusable override must fall through, not force 1.0"
+
+
+def test_the_buffer_is_allocated_in_device_pixels():
+    """The bug this whole section exists for: a 2x display was handed a 1x
+    buffer and the OS stretched it, so every glyph and every form control was
+    three-quarters interpolation."""
+    c = canvasmod.Canvas(width=100, height=50, scale=2.0)
+    assert c.device_size() == (200, 100), c.device_size()
+    s = c.render()
+    assert (s.width, s.height) == (200, 100), "surface is not device-sized"
+    # Still CSS pixels to everybody above.
+    assert (c.winfo_width(), c.winfo_height()) == (100, 50)
+
+
+def test_a_canvas_takes_its_scale_from_its_window():
+    """browser.py makes its canvas with no idea what display it is on, so
+    the window has to be where the answer lives."""
+    with _ScaleEnv(None):
+        w = Window(width=200, height=100, scale=2.0)
+        c = canvasmod.Canvas(w, width=200, height=100)
+        assert c.scale == 2.0
+        assert c.device_size() == (400, 200)
+
+
+def test_drawing_lands_on_the_device_pixels_it_should():
+    c = canvasmod.Canvas(width=40, height=40, bg="white", scale=2.0)
+    c.create_rectangle(10, 10, 20, 20, fill="#ff0000", width=0)
+    s = c.render()
+    assert _pixel(s, 30, 30) == (255, 0, 0), "the middle of the rect"
+    assert _pixel(s, 39, 39) == (255, 0, 0), "the last device pixel inside it"
+    assert _pixel(s, 41, 41) == (255, 255, 255), "the rect leaked past 20 CSS"
+    assert _pixel(s, 18, 18) == (255, 255, 255), "the rect started too early"
+
+
+def test_a_click_at_a_device_pixel_maps_back_to_one_css_pixel():
+    """Getting the buffer right and the hit testing wrong is worse than
+    doing neither: the page would be sharp and every link would be in the
+    wrong place."""
+    with _ScaleEnv(None):
+        w = Window(width=100, height=100, scale=2.0)
+        assert w.to_css(0, 0) == (0, 0)
+        assert w.to_css(1, 1) == (0, 0), "both device pixels are CSS pixel 0"
+        assert w.to_css(2, 3) == (1, 1)
+        assert w.to_css(199, 199) == (99, 99), "the far corner"
+        # Every device pixel of a CSS pixel maps to it, and no device pixel
+        # maps to two -- the property that makes hit testing correct rather
+        # than merely close.
+        for css in range(50):
+            assert {w.to_css(css * 2, 0)[0], w.to_css(css * 2 + 1, 0)[0]} \
+                == {css}
+        # And back the other way, which is what a window system is told.
+        assert w.to_device(100, 100) == (200, 200)
+        assert w.to_device(0, 0) == (1, 1), "never ask for a zero-sized buffer"
+
+
+def test_a_fractional_scale_maps_both_ways_without_gaps():
+    """Windows offers 125% and 150%, so nothing here may assume the factor
+    is a whole number."""
+    with _ScaleEnv(None):
+        w = Window(width=800, height=600, scale=1.5)
+        assert w.to_device(800, 600) == (1200, 900)
+        seen = set()
+        for device in range(120):
+            css = w.to_css(device, 0)[0]
+            assert 0 <= css <= device, "a CSS pixel outside the window"
+            seen.add(css)
+        assert seen == set(range(80)), "a CSS pixel no device pixel reaches"
+
+
+def test_a_backend_supplied_device_size_is_used_exactly():
+    """A window manager deals in whole physical pixels and tells us the
+    number. Re-deriving it through a fractional scale can miss by one, and a
+    buffer one pixel short of the window leaves an unpainted seam."""
+    with _ScaleEnv(None):
+        w = Window(width=100, height=100, scale=1.5)
+        c = canvasmod.Canvas(w, width=100, height=100)
+        w.canvas = c
+        w.resize(67, 67, (101, 101))
+        assert (w.width, w.height) == (67, 67), "the CSS size is ours"
+        assert c.device_size() == (101, 101), "the server's figure was ignored"
+        s = c.render()
+        assert (s.width, s.height) == (101, 101)
+
+
+def test_changing_scale_reallocates_and_keeps_the_css_size():
+    """Dragging a window between a Retina display and an external monitor.
+    The page does not reflow -- it is the same 300 CSS pixels wide -- but
+    every pixel behind it is a different pixel."""
+    with _ScaleEnv(None):
+        w = Window(width=300, height=200, scale=1.0)
+        c = canvasmod.Canvas(w, width=300, height=200)
+        w.canvas = c
+        assert c.device_size() == (300, 200)
+        assert w.set_scale(2.0), "a real change must report itself"
+        assert (w.width, w.height) == (300, 200), "the CSS size moved"
+        assert c.device_size() == (600, 400)
+        assert not w.set_scale(2.0), "the same scale twice is not a change"
+
+
+def test_glyphs_are_rasterised_at_the_device_size():
+    """The half of this that scaling a bitmap cannot do.
+
+    A 12px glyph magnified to 24 device pixels is four soft pixels where the
+    outline had one; a 12px glyph *rasterised* at 24 is the curve resolved at
+    the size it is shown. So drawing 12px text at scale 2 has to come out
+    pixel for pixel identical to drawing 24px text at scale 1 -- not merely
+    similar, identical, because it is the same outline through the same
+    rasteriser at the same size.
+    """
+    small = canvasmod.Font(family="Helvetica", size=12)
+    large = canvasmod.Font(family="Helvetica", size=24)
+    dense = raster.Surface(300, 80, (255, 255, 255))
+    plain = raster.Surface(300, 80, (255, 255, 255))
+    small.draw(dense, "Handgloves", 10 * 2, 40 * 2, (0, 0, 0), 2.0)
+    large.draw(plain, "Handgloves", 20, 80, (0, 0, 0))
+    assert bytes(dense.pixels) == bytes(plain.pixels), \
+        "text at 2x is not the same as text rasterised at twice the size"
+    marked = sum(1 for i in range(0, len(dense.pixels), 3)
+                 if dense.pixels[i] < 128)
+    assert marked > 100, "nothing was drawn, so the comparison proved nothing"
+
+
+def test_a_run_of_text_occupies_the_width_layout_measured():
+    """`measure` is in CSS pixels and layout believes it. Painting has to
+    agree after scaling, or a line of text drifts out of its box."""
+    font = canvasmod.Font(family="Helvetica", size=13)
+    s = raster.Surface(400, 40, (255, 255, 255))
+    text = "the quick brown fox"
+    advance = font.draw(s, text, 0, 30, (0, 0, 0), 2.0)
+    assert abs(advance - font.measure(text) * 2.0) < 1e-9, \
+        "the pen did not advance by the measured width in device pixels"
+
+
+def test_a_hairline_survives_being_scaled():
+    """A 1px border is 2 device pixels at 2x, and at 1.25 it is 1 -- but
+    never 0, which would delete a border the page asked for. Declining one
+    with width=0 still works."""
+    c = canvasmod.Canvas(width=40, height=40, bg="white", scale=2.0)
+    assert c._stroke(1) == 2
+    assert c._stroke(0) == 0, "width=0 means no border, at any scale"
+    thin = canvasmod.Canvas(width=40, height=40, bg="white", scale=1.25)
+    assert thin._stroke(1) == 1
+    assert thin._stroke(0) == 0
+    tiny = canvasmod.Canvas(width=40, height=40, bg="white", scale=0.5)
+    assert tiny._stroke(1) == 1, "a border must not round away to nothing"
+
+
+def test_an_image_covers_the_device_pixels_it_should():
+    """An image's pixels are its own, so a 2x2 picture in 2 CSS pixels has
+    to be resampled up to the 4 device pixels it now covers rather than
+    drawn at its own size in the corner."""
+    photo = canvasmod.PhotoImage(width=2, height=2)
+    photo.rgba = bytearray([255, 0, 0, 255] * 4)
+    photo.opaque = True
+    c = canvasmod.Canvas(width=20, height=20, bg="white", scale=2.0)
+    c.create_image(4, 4, image=photo, anchor="nw")
+    s = c.render()
+    for x, y in ((8, 8), (11, 11)):
+        assert _pixel(s, x, y) == (255, 0, 0), "device pixel %d,%d" % (x, y)
+    assert _pixel(s, 12, 12) == (255, 255, 255), "the image spread too far"
+    assert _pixel(s, 7, 7) == (255, 255, 255), "the image started too early"
+
+
+def test_resampling_an_image_agrees_with_the_css_resize():
+    """Two ways to make a picture bigger -- CSS width on an <img>, and a
+    dense display -- must land on the same source pixels, or the same image
+    looks different depending on which one did it."""
+    src = bytearray()
+    for y in range(4):
+        for x in range(4):
+            src += bytes([x * 60, y * 60, 0, 255])
+    by_css = imagecodec.resize(bytes(src), 4, 4, 8, 8)
+    dense = raster.Surface(8, 8, (0, 0, 0))
+    dense.blit_rgba(bytes(src), 4, 4, 0, 0, True, 8, 8)
+    for i in range(8 * 8):
+        assert tuple(dense.pixels[i * 3:i * 3 + 3]) == \
+            tuple(by_css[i * 4:i * 4 + 3]), "pixel %d differs" % i
+
+
+def test_a_scaled_blit_that_runs_off_the_surface_is_clipped():
+    """The clip is in destination pixels now that the destination size is a
+    separate number from the source size, which is the bounds check that
+    would otherwise be one buffer out."""
+    s = raster.Surface(8, 8, (0, 0, 0))
+    s.blit_rgba(bytes([255, 255, 255, 255] * 4), 2, 2, 6, 6, True, 10, 10)
+    assert _pixel(s, 7, 7) == (255, 255, 255), "nothing was drawn"
+    # A source buffer shorter than it claims must not be read past.
+    s.blit_rgba(bytes([255, 0, 0, 255]), 4, 4, 0, 0, True, 8, 8)
+
+
 # -- window / event loop ---------------------------------------------------
 
 def test_window_bindings_fire():

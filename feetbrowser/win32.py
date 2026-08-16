@@ -175,6 +175,10 @@ GMEM_MOVEABLE = 0x0002
 # browser this backend exists to avoid.
 DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
 
+# The DPI Windows calls 100%. Every scale factor on this platform is a ratio
+# against it, and it is a definition rather than a measurement.
+BASELINE_DPI = 96.0
+
 _CLASS_NAME = "FeetBrowserWindow"
 
 # Virtual key codes -> Tk keysyms, for the keys that carry no character.
@@ -266,6 +270,27 @@ def bgra_from_rgb(pixels, width, height, stride=None):
     out[2::4] = rgb[0::3]       # red
     # The fourth byte stays zero: BI_RGB at 32bpp ignores it.
     return out
+
+
+def scale_for_dpi(dpi):
+    """Device pixels per CSS pixel, from a Windows DPI figure.
+
+    96 is 100% by definition on Windows -- it is what the whole DPI story is
+    stated relative to, not a measurement -- so the ratio is the scale the
+    user picked in Display settings: 120 is 125%, 144 is 150%, 192 is 200%.
+    Windows offers scales that are not whole numbers, unlike the other two
+    platforms, which is why nothing downstream is allowed to assume the
+    factor is an integer.
+
+    A nonsense DPI, including the zero a failed query returns, is 1.0 rather
+    than a division that would either explode or allocate a buffer measured
+    in gigabytes.
+    """
+    try:
+        dpi = float(dpi)
+    except (TypeError, ValueError):
+        return 1.0
+    return dpi / BASELINE_DPI if dpi > 0 else 1.0
 
 
 def signed_word(value):
@@ -611,7 +636,15 @@ class Win32Window(Window):
         user32 = _libs["user32"]
         _register_class()
         style = WS_OVERLAPPEDWINDOW
-        outer = self._frame_size(self.width, self.height, style)
+        # A per-monitor-aware process is handed physical pixels everywhere --
+        # client rects, WM_SIZE, mouse positions -- so the scale has to be
+        # known before the window is asked for, and before anybody makes a
+        # canvas off us. There is no window yet to ask, so this is the system
+        # DPI; WM_DPICHANGED corrects it the moment the window lands
+        # somewhere that disagrees.
+        self.set_scale(scale_for_dpi(_dpi_for(None)))
+        outer = self._frame_size(*self.to_device(self.width, self.height),
+                                 style=style)
         self._closed = False
         self._frame = None          # the last converted frame, for WM_PAINT
         self._frame_dims = (0, 0)
@@ -648,6 +681,10 @@ class Win32Window(Window):
     def _frame_size(width, height, style, hwnd=None):
         """The outer size whose *client* area is width x height.
 
+        In physical pixels, both in and out: a window rectangle is physical
+        pixels to a per-monitor-aware process, and so are the caption and
+        border widths this adds to it. Callers convert on the way in.
+
         `hwnd` is the window being measured, when there is one; at creation
         there is not, and the system DPI stands in until the window lands on
         a monitor and WM_DPICHANGED corrects it.
@@ -667,8 +704,8 @@ class Win32Window(Window):
         super().resize(width, height)
         if self._closed:
             return
-        outer = self._frame_size(self.width, self.height, WS_OVERLAPPEDWINDOW,
-                                 self._hwnd)
+        outer = self._frame_size(*self.to_device(self.width, self.height),
+                                 style=WS_OVERLAPPEDWINDOW, hwnd=self._hwnd)
         _libs["user32"].SetWindowPos(
             self._hwnd, None, 0, 0, outer[0], outer[1],
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)
@@ -768,14 +805,7 @@ class Win32Window(Window):
         if message == WM_ERASEBKGND:
             return 1    # every pixel is ours; erasing it first only flickers
         if message == WM_SIZE:
-            width, height = signed_word(lparam), signed_word(lparam >> 16)
-            if width and height and (width, height) != (self.width,
-                                                        self.height):
-                # The base implementation, not ours: the window is already
-                # this size, and asking Windows to resize it again mid-drag
-                # fights the user.
-                Window.resize(self, width, height)
-            self._repaint = True
+            self._on_size(lparam)
             return 0
         if message == WM_TIMER:
             if wparam == _PUMP_TIMER_ID:
@@ -787,7 +817,7 @@ class Win32Window(Window):
                 return 0
             return None
         if message == WM_DPICHANGED:
-            return self._on_dpichanged(lparam)
+            return self._on_dpichanged(wparam, lparam)
         if message == WM_GETMINMAXINFO:
             return self._on_minmax(lparam)
         if message == WM_SETCURSOR:
@@ -844,7 +874,29 @@ class Win32Window(Window):
             self._repaint = True
         return 0
 
-    def _on_dpichanged(self, lparam):
+    def _on_size(self, lparam):
+        """Adopt the client size Windows just gave us.
+
+        The size in a WM_SIZE is physical pixels, so it is the buffer's size
+        and not the page's. It is handed to the canvas as-is rather than
+        recomputed from the CSS size: at 125% the round trip through the
+        scale does not land back where it started, and the buffer would come
+        out a pixel short of the window with an unpainted seam down one edge.
+        """
+        device = (signed_word(lparam), signed_word(lparam >> 16))
+        if not device[0] or not device[1]:
+            return
+        width, height = self.to_css(*device)
+        stale = (self.canvas is not None
+                 and self.canvas.device_size() != device)
+        if stale or (width, height) != (self.width, self.height):
+            # The base implementation, not ours: the window is already
+            # this size, and asking Windows to resize it again mid-drag
+            # fights the user.
+            Window.resize(self, width, height, device)
+        self._repaint = True
+
+    def _on_dpichanged(self, wparam, lparam):
         """Follow the window to its new scale.
 
         A per-monitor-v2 process is told, not asked: Windows has already
@@ -855,10 +907,19 @@ class Win32Window(Window):
         drawn at the new scale around a client area still sized for the old
         one, and the two disagree by whatever the ratio is.
 
-        Nothing here rescales the page: the canvas is measured in real
-        pixels and simply gets more of them, which is the whole point of
-        asking for awareness in the first place.
+        The new DPI is in the low word of wParam, and it is adopted *before*
+        the window is moved, because SetWindowPos sends WM_SIZE synchronously
+        and that handler converts a physical size into a CSS one. Read in the
+        other order it would convert with the old scale and the page would
+        lay out at the wrong width for one frame.
         """
+        if self.set_scale(scale_for_dpi(wparam & 0xFFFF)):
+            # The window keeps the same size in CSS pixels across the move --
+            # a 1000-pixel-wide page is 1000 pixels wide on both monitors --
+            # but every pixel of the frame on screen was drawn for the old
+            # density, so it all has to be laid down again.
+            if self.canvas is not None:
+                self.canvas.dirty = True
         suggested = ctypes.cast(ctypes.c_void_p(lparam),
                                 ctypes.POINTER(RECT)).contents
         _libs["user32"].SetWindowPos(
@@ -876,8 +937,12 @@ class Win32Window(Window):
             return None
         info = ctypes.cast(ctypes.c_void_p(lparam),
                            ctypes.POINTER(MINMAXINFO)).contents
-        outer = self._frame_size(self.min_width, self.min_height,
-                                 WS_OVERLAPPEDWINDOW, self._hwnd)
+        # A track size is physical pixels like every other window rectangle,
+        # so a minimum stated in CSS pixels has to be scaled or the user can
+        # drag the window down to half the size the browser can lay out in.
+        outer = self._frame_size(
+            *self.to_device(self.min_width, self.min_height),
+            style=WS_OVERLAPPEDWINDOW, hwnd=self._hwnd)
         info.ptMinTrackSize.x, info.ptMinTrackSize.y = outer
         return 0
 
@@ -910,7 +975,10 @@ class Win32Window(Window):
                               held(VK_MENU) & 0x8000)
 
     def _on_mouse(self, message, wparam, lparam):
-        x, y = lparam_point(lparam)
+        # Physical pixels in, CSS pixels out. Hit testing above here has no
+        # idea the display is dense, so this is the only place a click on a
+        # link at the bottom of a 2x window stops landing halfway up it.
+        x, y = self.to_css(*lparam_point(lparam))
         state = self._state()
         user32 = _libs["user32"]
         if message == WM_MOUSEMOVE:
@@ -953,8 +1021,9 @@ class Win32Window(Window):
         # mouse message. Forgetting that puts the scroll in the wrong frame.
         point = POINT(signed_word(lparam), signed_word(lparam >> 16))
         _libs["user32"].ScreenToClient(self._hwnd, ctypes.byref(point))
+        x, y = self.to_css(point.x, point.y)
         self.dispatch("<MouseWheel>",
-                      Event(x=point.x, y=point.y, delta=delta,
+                      Event(x=x, y=y, delta=delta,
                             state=self._state(), type="<MouseWheel>"))
 
     def _on_key(self, vk):
