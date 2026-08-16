@@ -210,6 +210,22 @@ Type a URL in the address bar and press Enter, or type words to search
 (DuckDuckGo HTML). Bare hosts without a scheme (`example.com:8080`,
 `localhost:8000`) are assumed to be `https://`.
 
+## Tabs and the toolbar
+
+New tabs open with **`Ctrl-T`**, with the **`+`** button at the right of
+the tab strip, by middle-clicking empty tab-bar space, or by middle- or
+`Ctrl`-clicking a link. The **`×`** on a tab closes it (`Ctrl-W` closes the
+active one), `Ctrl-Tab` / `Ctrl-Shift-Tab` walk between tabs, and a tab can
+be closed from its close box regardless of which tab is active.
+
+The toolbar row under the tabs is, left to right: back `‹` and forward `›`
+(also `Alt-←` / `Alt-→`), reload `↻`, home `⌂`, any toe toolbar buttons,
+the bookmark star (`Ctrl-D`), the address bar, and the hamburger settings
+button. The settings menu holds **Bookmarks**, **History** and **Manage
+Shoes**, which open the `about:` pages `about:bookmarks`, `about:history`
+and `about:shoes`, and **Manage Toes**, which opens `toe://hub`; every item
+opens its page in a new tab, leaving the page you were reading alone.
+
 ## Forms
 
 Basic form support is wired up: `input[type=text/password]` fields are

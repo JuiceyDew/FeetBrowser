@@ -101,7 +101,8 @@ from some other toolkit has no window to appear in.
 
 ## Managing toes
 
-**From the browser**: `toe://hub`:
+**From the browser**: `toe://hub`, or **Manage Toes** in the hamburger
+settings menu (right of the address bar), which opens the hub in a new tab:
 - install / uninstall any toe from the catalog
 - enable / disable installed toes (disabled toes stay installed but no hooks fire)
 

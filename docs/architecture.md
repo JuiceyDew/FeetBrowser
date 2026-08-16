@@ -48,7 +48,8 @@ WebKit, Gecko, or any HTTP library; it implements its own:
   with no display, the browser runs headless, which is also how
   `--screenshot` and the whole test suite run on every platform.
 - **Browser UI**: a hand-drawn chrome on that canvas: tabs, an address bar
-  with search fallback, back / forward / reload / home buttons,
+  with search fallback, back / forward / reload / home buttons, a settings
+  menu off the hamburger button (the `about:` pages and the toe hub),
   hover + clickable links, middle-click / ctrl-click to open in a new tab,
   scrolling, a scrollbar, bookmark toggling, and a status bar. Repainting is
   layered: page, chrome, selection, and toe overlays are tracked by canvas

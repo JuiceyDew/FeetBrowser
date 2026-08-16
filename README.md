@@ -78,6 +78,9 @@ To render a page to a PNG without opening a window:
 - Add extensions ("toes"): open **`toe://hub`** in the browser
 - Restyle the browser with **Shoes** themes: open **`about:shoes`**
   (`Ctrl+Shift+S`)
+- Use the hamburger settings menu (right of the address bar) for
+  bookmarks, history, themes, and **Manage Toes** (`toe://hub`), each in
+  a new tab
 - Keyboard shortcuts: `Ctrl-T` new tab, `Ctrl-L` focus address bar,
   `Ctrl-W` close tab, and more
 
