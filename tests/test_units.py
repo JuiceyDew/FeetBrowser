@@ -4962,7 +4962,6 @@ def test_h2_client_sends_the_host_header_as_authority():
 
 def _h2_read_exact(conn, n):
     """Read exactly n bytes or raise at EOF, for the in-process peers."""
-    import socket as socket_mod
     buf = b""
     while len(buf) < n:
         chunk = conn.recv(n - len(buf))
@@ -4974,7 +4973,6 @@ def _h2_read_exact(conn, n):
 
 def _h2_read_frame(conn):
     """Read one 9-byte-header + payload frame, or raise at EOF."""
-    import socket as socket_mod
     import struct
     head = _h2_read_exact(conn, 9)
     length = int.from_bytes(head[0:3], "big")
@@ -5299,8 +5297,8 @@ def test_h2_client_fails_cleanly_when_the_peer_resets_or_dies():
     sock.settimeout(5)
     conn = H2Connection(sock, 1024)
     try:
-        conn.start()
         try:
+            conn.start()
             conn.request("GET", "/", {"host": "x"})
             assert False, "expected H2Error when the peer dies"
         except H2Error:
