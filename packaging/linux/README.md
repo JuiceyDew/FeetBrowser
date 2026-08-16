@@ -242,14 +242,13 @@ that has no Python, and it is useful for debugging a bundle in the field.
 
 ## The icon
 
-The repository shipped no artwork, and importing an image library to make some
-would be the one dependency this project does not take. It does not need one.
-`packaging/linux/make_icon.py` draws a footprint out of ellipses and one
-quadratic-bezier-sided arch, hands the polygons to `raster.rasterize`, the
-same anti-aliased scanline rasteriser that draws every glyph on every page,
-and composites the coverage bitmap with `Surface.blit_coverage`. Rendered
-separately at each of the four sizes rather than resampled from one, so the
-48-pixel menu icon is drawn rather than shrunk.
+The artwork lives once, as `packaging/art/feet.png`, and every platform's icon
+is a resample of it: the Windows `.ico`, the macOS iconset, and these hicolor
+PNGs. `packaging/linux/make_icon.py` decodes that one PNG and area-averages it
+down to each of the four sizes, pure standard library, so there is no second
+copy of the art anywhere and no image library to import. Shrinking is a fair
+sample of the whole mark rather than one pixel in every N, so the 48-pixel
+menu icon stays legible.
 
 ## Building it
 

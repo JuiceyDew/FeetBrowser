@@ -191,16 +191,11 @@ so it is not mistaken for a bundling mistake.
 
 ### The icon
 
-There is no artwork in this repository, so `icon.py` draws one -- with the
-browser's own rasteriser rather than an image library. `raster.rasterize`
-turns polygons into an anti-aliased coverage bitmap and
-`Surface.blit_coverage` composites it; the footprint is a disc swept down a
-spine plus five toes, unioned by nonzero winding, and the rounded-square
-coverage doubles as the alpha channel. `Surface.save_png` writes RGB and an
-icon without alpha is a square in a Dock full of rounded ones, so the twenty
-lines that write RGBA are in `icon.py` too. Every size in the iconset is
-drawn at its own resolution rather than resampled down from one big one,
-because the 16pt icon is four pixels of toe. `iconutil` turns the result
+The artwork lives once, as `packaging/art/feet.png`, and `icon.py` resamples
+it to the ten iconset PNGs -- pure standard library, since macOS packaging
+runs on the system Python that cannot import the browser's engine. Shrinking
+is an area average of the source, so the 16pt icon is a fair sample of the
+whole mark rather than one pixel in every N. `iconutil` turns the result
 into `FeetBrowser.icns`.
 
 ## Universal binary

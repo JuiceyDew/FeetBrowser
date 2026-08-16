@@ -273,9 +273,9 @@ RPATH
 # -- 8. icon, desktop entry, AppRun ----------------------------------------
 step "icon"
 ICONS="$APPDIR/usr/share/icons/hicolor"
-# Drawn by the interpreter we just built, against the engine we just built:
-# the artwork comes out of this project's own rasteriser, not an image
-# library, and the run doubles as the first proof that the two work together.
+# Resampled from the one artwork file, packaging/art/feet.png, which is the
+# same source the Windows .ico and the macOS iconset come from. The script is
+# pure standard library, so it runs on the plain CPython building the bundle.
 PYTHONPATH="$SITE" "$PY" "$SRC/packaging/linux/make_icon.py" "$WORK/icons"
 for size in 256 128 64 48; do
   mkdir -p "$ICONS/${size}x${size}/apps"

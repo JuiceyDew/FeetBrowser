@@ -293,9 +293,10 @@ configuration is incorrect", which mentions neither XML nor the file. This
 cost a CI run to a double hyphen inside an XML comment, where it is illegal.
 Now it is a build error with a line number.
 
-`make-icon.py` draws the `.ico`: standard library only, seven sizes, PNG
-entries. It exists so that the one binary file in this directory is
-reviewable: change a number, re-run, and the diff is explained.
+`make-icon.py` resamples the one artwork file, `packaging/art/feet.png`, into
+the `.ico`: standard library only, seven sizes, PNG entries. It exists so
+that the one binary file in this directory is reviewable: change the artwork,
+re-run, and the diff is explained.
 
 
 ## Building it

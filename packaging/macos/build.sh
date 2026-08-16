@@ -449,9 +449,9 @@ echo "$roots root certificates"
 
 # -- 8. the icon -------------------------------------------------------------
 #
-# Drawn by the browser's own rasteriser, running on the interpreter that is
-# about to ship, against the extension that is about to ship. If the icon
-# comes out, a good deal of the bundle already works.
+# Resampled from the one artwork file, packaging/art/feet.png, the same source
+# the Windows .ico and the Linux hicolor PNGs come from. Pure standard
+# library, so it runs on the system Python that builds the bundle.
 
 say "icon"
 PYTHONPATH="$applib" "$pybin" "$here/icon.py" "$work/FeetBrowser.iconset"
