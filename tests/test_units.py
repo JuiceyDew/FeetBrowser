@@ -4775,6 +4775,14 @@ def test_hpack_encoder_round_trips_a_connection_of_requests():
         got = decode_header_block(block, dec, 4096)
         eq(got, req, f"request {i + 1} round trip")
         eq(enc.size, dec.size, "encoder and decoder tables stay in lockstep")
+    # The very first request is an exact hit on the static table: :method GET
+    # is index 2, so its representation must be the single byte 0x82. Before
+    # the static-table lookup was keyed the same (bytes) as the encoder's
+    # inputs, this encoded as a full literal instead.
+    block = encode_header_block(requests[0], DynamicTable())
+    eq(block[0], 0x82, "first request starts with the indexed static :method")
+    eq(decode_header_block(block, DynamicTable(), 4096), requests[0],
+       "indexed static form still decodes")
 
 
 def _h2_server(responses, log=None):
@@ -4838,7 +4846,10 @@ def _h2_server(responses, log=None):
                         + [(k.encode("latin1"), v.encode("latin1"))
                            for k, v in resp_headers.items()],
                         enc)
-                    conn.sendall(frame(T_HEADERS, F_END_HEADERS, stream_id,
+                    # An empty body terminates on the HEADERS frame; a
+                    # non-empty one on the final DATA frame.
+                    head_flags = F_END_HEADERS | (0 if body else F_END_STREAM)
+                    conn.sendall(frame(T_HEADERS, head_flags, stream_id,
                                        block))
                     for i in range(0, len(body), 16384):
                         piece = body[i:i + 16384]
@@ -4949,6 +4960,255 @@ def test_h2_client_sends_the_host_header_as_authority():
         srv.close()
 
 
+def _h2_read_exact(conn, n):
+    """Read exactly n bytes or raise at EOF, for the in-process peers."""
+    import socket as socket_mod
+    buf = b""
+    while len(buf) < n:
+        chunk = conn.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("closed")
+        buf += chunk
+    return buf
+
+
+def _h2_read_frame(conn):
+    """Read one 9-byte-header + payload frame, or raise at EOF."""
+    import socket as socket_mod
+    import struct
+    head = _h2_read_exact(conn, 9)
+    length = int.from_bytes(head[0:3], "big")
+    ftype, flags = head[3], head[4]
+    stream_id = struct.unpack("!I", head[5:9])[0] & 0x7FFFFFFF
+    return ftype, flags, stream_id, _h2_read_exact(conn, length)
+
+
+def test_h2_client_handles_headers_split_across_continuation_frames():
+    """A server that splits a response header block across HEADERS and
+    CONTINUATION frames (the fate of large cookie sets) must not kill the
+    connection; the fragments are reassembled before HPACK decoding."""
+    import socket as socket_mod
+    import struct
+    from feetbrowser.h2 import H2Connection
+    from feetbrowser.hpack import DynamicTable, encode_header_block
+
+    PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+    F_END_STREAM, F_END_HEADERS = 0x1, 0x4
+    T_HEADERS, T_CONT, T_SETTINGS, T_DATA = 0x1, 0x9, 0x4, 0x0
+
+    def frame(ftype, flags, stream_id, payload=b""):
+        return (len(payload).to_bytes(3, "big")
+                + bytes((ftype, flags))
+                + struct.pack("!I", stream_id & 0x7FFFFFFF) + payload)
+
+    def server(port):
+        conn, _ = port.accept()
+        try:
+            _h2_read_exact(conn, len(PREFACE))
+            conn.sendall(frame(T_SETTINGS, 0, 0, b""))
+            enc = DynamicTable()
+            while True:
+                ftype, flags, stream_id, payload = _h2_read_frame(conn)
+                if ftype == T_SETTINGS:
+                    conn.sendall(frame(T_SETTINGS, 0x1, 0, b""))  # ACK
+                elif ftype == T_HEADERS:
+                    break
+            block = encode_header_block(
+                [(b":status", b"200")]
+                + [(f"x-cookie-{i}".encode(), f"v{i}".encode())
+                   for i in range(30)],
+                enc)
+            mid = 60
+            conn.sendall(frame(T_HEADERS, 0, stream_id, block[:mid]))
+            conn.sendall(frame(T_CONT, F_END_HEADERS, stream_id, block[mid:]))
+            conn.sendall(frame(T_DATA, F_END_STREAM, stream_id, b"ok"))
+            # Half-close and drain: closing with unread client frames in the
+            # receive queue would RST the socket and discard our response.
+            conn.shutdown(socket_mod.SHUT_WR)
+            while _h2_read_frame(conn):
+                pass
+        except (OSError, ConnectionError):
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    srv = socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_STREAM)
+    srv.setsockopt(socket_mod.SOL_SOCKET, socket_mod.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    port = srv.getsockname()[1]
+    threading.Thread(target=server, args=(srv,), daemon=True).start()
+    sock = socket_mod.create_connection(("127.0.0.1", port))
+    sock.settimeout(5)
+    conn = H2Connection(sock, 64 * 1024 * 1024)
+    conn.start()
+    try:
+        status, headers, body = conn.request("GET", "/", {"host": "x"})
+        eq(status, 200, "status after a split header block")
+        eq(body, b"ok", "body after a split header block")
+        eq(headers.get("x-cookie-29"), "v29",
+           "fragments reassembled before decoding")
+    finally:
+        conn.close()
+        srv.close()
+
+
+def test_h2_client_ignores_unknown_frame_types():
+    """RFC 7540 Sections 4.1 and 5.5 require discarding frames of an unknown
+    type; deployed servers send extension frames like ALTSVC, so one must not
+    take the connection down."""
+    import socket as socket_mod
+    import struct
+    from feetbrowser.h2 import H2Connection
+    from feetbrowser.hpack import DynamicTable, encode_header_block
+
+    PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+    F_END_STREAM, F_END_HEADERS = 0x1, 0x4
+    T_HEADERS, T_SETTINGS, T_DATA = 0x1, 0x4, 0x0
+    T_ALTSVC = 0xA  # an extension frame real servers actually send
+
+    def frame(ftype, flags, stream_id, payload=b""):
+        return (len(payload).to_bytes(3, "big")
+                + bytes((ftype, flags))
+                + struct.pack("!I", stream_id & 0x7FFFFFFF) + payload)
+
+    def server(port):
+        conn, _ = port.accept()
+        try:
+            _h2_read_exact(conn, len(PREFACE))
+            conn.sendall(frame(T_SETTINGS, 0, 0, b""))
+            while True:
+                ftype, flags, stream_id, payload = _h2_read_frame(conn)
+                if ftype == T_SETTINGS:
+                    conn.sendall(frame(T_SETTINGS, 0x1, 0, b""))  # ACK
+                elif ftype == T_HEADERS:
+                    break
+            block = encode_header_block([(b":status", b"200")], DynamicTable())
+            conn.sendall(frame(T_ALTSVC, 0, 0, b"h2=\":443\""))
+            conn.sendall(frame(T_HEADERS, F_END_HEADERS, stream_id, block))
+            conn.sendall(frame(T_DATA, F_END_STREAM, stream_id, b"ok"))
+            # Half-close and drain: closing with unread client frames in the
+            # receive queue would RST the socket and discard our response.
+            conn.shutdown(socket_mod.SHUT_WR)
+            while _h2_read_frame(conn):
+                pass
+        except (OSError, ConnectionError):
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    srv = socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_STREAM)
+    srv.setsockopt(socket_mod.SOL_SOCKET, socket_mod.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    port = srv.getsockname()[1]
+    threading.Thread(target=server, args=(srv,), daemon=True).start()
+    sock = socket_mod.create_connection(("127.0.0.1", port))
+    sock.settimeout(5)
+    conn = H2Connection(sock, 64 * 1024 * 1024)
+    conn.start()
+    try:
+        status, _headers, body = conn.request("GET", "/", {"host": "x"})
+        eq(status, 200, "extension frame did not kill the connection")
+        eq(body, b"ok", "response still delivered")
+    finally:
+        conn.close()
+        srv.close()
+
+
+def test_h2_client_splits_large_request_bodies_under_flow_control():
+    """A request body larger than the default frame size is split into DATA
+    frames of at most 16384 bytes, and a body larger than the peer's
+    flow-control window waits for WINDOW_UPDATE credit instead of stalling or
+    overrunning the window."""
+    import socket as socket_mod
+    import struct
+    from feetbrowser.h2 import H2Connection
+    from feetbrowser.hpack import DynamicTable, encode_header_block
+
+    PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+    F_END_STREAM, F_ACK, F_END_HEADERS = 0x1, 0x1, 0x4
+    T_HEADERS, T_DATA, T_SETTINGS, T_WINDOW_UPDATE = 0x1, 0x0, 0x4, 0x8
+
+    def frame(ftype, flags, stream_id, payload=b""):
+        return (len(payload).to_bytes(3, "big")
+                + bytes((ftype, flags))
+                + struct.pack("!I", stream_id & 0x7FFFFFFF) + payload)
+
+    seen = {"sizes": [], "total": 0}
+    seen_lock = threading.Lock()
+
+    def server(port):
+        conn, _ = port.accept()
+        try:
+            _h2_read_exact(conn, len(PREFACE))
+            conn.sendall(frame(T_SETTINGS, 0, 0, b""))  # default 65535 window
+            enc = DynamicTable()
+            while True:
+                ftype, flags, stream_id, payload = _h2_read_frame(conn)
+                if ftype == T_SETTINGS:
+                    conn.sendall(frame(T_SETTINGS, F_ACK, 0, b""))
+                elif ftype == T_DATA:
+                    with seen_lock:
+                        seen["sizes"].append(len(payload))
+                        seen["total"] += len(payload)
+                    # Return the credit the client just spent.
+                    conn.sendall(frame(T_WINDOW_UPDATE, 0, 0,
+                                       len(payload).to_bytes(4, "big")))
+                    conn.sendall(frame(T_WINDOW_UPDATE, 0, stream_id,
+                                       len(payload).to_bytes(4, "big")))
+                    if flags & F_END_STREAM:
+                        block = encode_header_block(
+                            [(b":status", b"200")], enc)
+                        conn.sendall(frame(T_HEADERS, F_END_HEADERS,
+                                           stream_id, block))
+                        conn.sendall(frame(T_DATA, F_END_STREAM, stream_id,
+                                           b"ok"))
+                        # Half-close and drain: closing with unread client
+                        # frames in the receive queue would RST the socket and
+                        # discard our response.
+                        conn.shutdown(socket_mod.SHUT_WR)
+                        while _h2_read_frame(conn):
+                            pass
+                        return
+        except (OSError, ConnectionError):
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    srv = socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_STREAM)
+    srv.setsockopt(socket_mod.SOL_SOCKET, socket_mod.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    port = srv.getsockname()[1]
+    threading.Thread(target=server, args=(srv,), daemon=True).start()
+    sock = socket_mod.create_connection(("127.0.0.1", port))
+    sock.settimeout(5)
+    conn = H2Connection(sock, 64 * 1024 * 1024)
+    conn.start()
+    try:
+        status, _headers, body = conn.request(
+            "POST", "/", {"host": "x"}, b"y" * 70000)
+        eq(status, 200, "server answered after receiving the body")
+        eq(body, b"ok", "response body")
+        with seen_lock:
+            eq(seen["total"], 70000, "the peer received the whole body")
+            assert all(n <= 16384 for n in seen["sizes"]), \
+                "every DATA frame stayed within the peer's max frame size"
+    finally:
+        conn.close()
+        srv.close()
+
+
 def test_h2_client_fails_cleanly_when_the_peer_resets_or_dies():
     """A peer that resets the stream, closes the socket, or goes away
     entirely must surface as an H2Error, not a hang or a raw socket error
@@ -4974,7 +5234,10 @@ def test_h2_client_fails_cleanly_when_the_peer_resets_or_dies():
         try:
             buf = b""
             while len(buf) < 24:
-                buf += conn.recv(24 - len(buf))
+                chunk = conn.recv(24 - len(buf))
+                if not chunk:
+                    return  # peer closed before finishing the preface
+                buf += chunk
             conn.sendall(frame(0x4, 0, 0, b""))  # SETTINGS
             while True:
                 head = b""
@@ -5007,15 +5270,18 @@ def test_h2_client_fails_cleanly_when_the_peer_resets_or_dies():
 
     threading.Thread(target=rst_loop, daemon=True).start()
     sock = socket_mod.create_connection(("127.0.0.1", port))
+    sock.settimeout(5)
     conn = H2Connection(sock, 1024)
     conn.start()
     try:
-        conn.request("GET", "/", {"host": "x"})
-        assert False, "expected H2Error for a reset stream"
-    except H2Error as exc:
-        assert "reset" in str(exc).lower(), str(exc)
-    conn.close()
-    srv.close()
+        try:
+            conn.request("GET", "/", {"host": "x"})
+            assert False, "expected H2Error for a reset stream"
+        except H2Error as exc:
+            assert "reset" in str(exc).lower(), str(exc)
+    finally:
+        conn.close()
+        srv.close()
 
     # Peer that accepts the connection and then vanishes.
     srv = socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_STREAM)
@@ -5030,15 +5296,18 @@ def test_h2_client_fails_cleanly_when_the_peer_resets_or_dies():
 
     threading.Thread(target=die_loop, daemon=True).start()
     sock = socket_mod.create_connection(("127.0.0.1", port))
+    sock.settimeout(5)
     conn = H2Connection(sock, 1024)
     try:
         conn.start()
-        conn.request("GET", "/", {"host": "x"})
-        assert False, "expected H2Error when the peer dies"
-    except H2Error:
-        pass
-    conn.close()
-    srv.close()
+        try:
+            conn.request("GET", "/", {"host": "x"})
+            assert False, "expected H2Error when the peer dies"
+        except H2Error:
+            pass
+    finally:
+        conn.close()
+        srv.close()
 
 
 def main():

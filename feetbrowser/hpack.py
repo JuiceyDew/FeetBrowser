@@ -148,15 +148,17 @@ STATIC_TABLE_BYTES = [(n.encode("ascii"), v.encode("ascii"))
                       for n, v in STATIC_TABLE]
 
 #: Static table names only, for encoder name-index lookups: name -> lowest
-#: index that has that name (RFC does not require a specific choice).
+#: index that has that name (RFC does not require a specific choice). Keyed
+#: by bytes like the encoder's inputs, or every lookup would miss and the
+#: static table would never compress anything.
 _STATIC_NAMES = {}
-for _i, (_n, _v) in enumerate(STATIC_TABLE, 1):
+for _i, (_n, _v) in enumerate(STATIC_TABLE_BYTES, 1):
     _STATIC_NAMES.setdefault(_n, _i)
 
 #: Static table full (name, value) lookup for the encoder: the cheapest
 #: exact-index representation. Later entries overwrite earlier ones; both
 #: resolve to a valid index, so which one wins does not matter.
-_STATIC_FULL = {(_n, _v): _i for _i, (_n, _v) in enumerate(STATIC_TABLE, 1)}
+_STATIC_FULL = {(_n, _v): _i for _i, (_n, _v) in enumerate(STATIC_TABLE_BYTES, 1)}
 
 
 class HpackError(ValueError):
@@ -211,6 +213,10 @@ def huffman_encode(data):
         while nbits >= 8:
             nbits -= 8
             out.append((acc >> nbits) & 0xFF)
+        # Keep only the unconsumed bits: acc is shifted left on every symbol,
+        # and without this mask it becomes an arbitrarily-wide integer that
+        # makes the whole function quadratic in the length of the input.
+        acc &= (1 << nbits) - 1
     if nbits:
         out.append(((acc << (8 - nbits)) | ((1 << (8 - nbits)) - 1)) & 0xFF)
     return bytes(out)
@@ -358,6 +364,9 @@ class DynamicTable:
         self.max_size = max_size
         self._entries = []  # newest first
         self.size = 0
+        # The table size we have told the peer about; the encoder emits a
+        # size update whenever this diverges from `max_size`.
+        self.last_advertised = max_size
 
     def _entry_size(self, name, value):
         return len(name) + len(value) + 32
@@ -400,10 +409,6 @@ class DynamicTable:
             if entry == (name, value):
                 return i
         return None
-
-
-def _entry_size(name, value):
-    return len(name) + len(value) + 32
 
 
 # -- Header block decoding --------------------------------------------
@@ -488,8 +493,20 @@ def encode_header_block(headers, dynamic_table, huffman=True):
     encoder-side dynamic table so repeated fields compress across requests.
     """
     out = bytearray()
+    # The peer's SETTINGS_HEADER_TABLE_SIZE may have changed since the last
+    # block we encoded; RFC 7541 Section 4.2 requires a dynamic table size
+    # update at the head of the first block that follows such a change.
+    if dynamic_table.max_size != dynamic_table.last_advertised:
+        head = _encode_int(dynamic_table.max_size, 5)
+        head[0] |= 0x20
+        out.extend(head)
+        dynamic_table.last_advertised = dynamic_table.max_size
+
     for name, value in headers:
         # Exact match in the dynamic or static table: just an index.
+        # Dynamic-table indices are 1-based and sit after the static table,
+        # so they are offset by STATIC_TABLE_SIZE; static indices are already
+        # absolute.
         index = dynamic_table.find_full(name, value)
         if index is not None:
             index += STATIC_TABLE_SIZE
@@ -504,10 +521,10 @@ def encode_header_block(headers, dynamic_table, huffman=True):
         # A name match buys an indexed name; still add to the dynamic table
         # so the value compresses on the next identical field.
         name_index = dynamic_table.find_name(name)
-        if name_index is None:
-            name_index = _STATIC_NAMES.get(name)
         if name_index is not None:
             name_index += STATIC_TABLE_SIZE
+        else:
+            name_index = _STATIC_NAMES.get(name)
         head = _encode_int(name_index or 0, 6)
         head[0] |= 0x40
         out.extend(head)

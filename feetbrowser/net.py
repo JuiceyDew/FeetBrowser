@@ -709,7 +709,7 @@ class URL:
             return self._read_response(sock)
 
         # HTTP/2: a multiplexed connection already parked for this origin, or
-        # a fresh one whose TLS handshake negotiated h2.
+        # a fresh TLS socket whose handshake negotiated h2.
         if self.scheme == "https":
             conn = _h2_take(origin)
             if conn is not None:
@@ -719,29 +719,32 @@ class URL:
                     # The multiplexed connection died under us; drop it and
                     # fall through to a fresh one rather than failing.
                     _h2_drop(origin, conn)
-            s = self._new_connection()
-            if _alpn_proto(s) == "h2":
-                conn = H2Connection(s, _MAX_BODY_BYTES)
-                conn.start()
-                try:
-                    result = conn.request(method, self.path, headers,
-                                          body_bytes)
-                except (H2Error, OSError):
-                    _close_socket(s)
-                    raise
-                _h2_park(origin, conn)
-                return result
-        else:
-            s = self._new_connection()
-
-        # HTTP/1.1: reuse a parked socket when one is available, retrying once
-        # on a fresh connection if a parked one went stale.
-        pooled = False
-        if s is None:
+            # Reuse an idle HTTP/1.1 socket first; a fresh TLS socket is only
+            # opened to learn the negotiated protocol when the pool is empty.
             s = _pool_take(origin)
             pooled = s is not None
-        if s is None:
-            s = self._new_connection()
+            if s is None:
+                s = self._new_connection()
+                if _alpn_proto(s) == "h2":
+                    conn = H2Connection(s, _MAX_BODY_BYTES)
+                    try:
+                        conn.start()
+                        result = conn.request(method, self.path, headers,
+                                              body_bytes)
+                    except (H2Error, OSError):
+                        _close_socket(s)
+                        raise
+                    _h2_park(origin, conn)
+                    return result
+        else:
+            s = _pool_take(origin)
+            pooled = s is not None
+            if s is None:
+                s = self._new_connection()
+
+        # HTTP/1.1: retry once on a fresh connection if a parked one went
+        # stale (the peer closed it, e.g. an HTTP/1.0 server or a keep-alive
+        # timeout).
         try:
             try:
                 status, resp_headers, body, reusable = attempt(s)
@@ -749,9 +752,6 @@ class URL:
                 _close_socket(s)
                 if not pooled:
                     raise
-                # The parked connection went stale (the peer closed it, e.g.
-                # an HTTP/1.0 server or a keep-alive timeout): retry once on
-                # a fresh connection rather than failing the request.
                 s = self._new_connection()
                 status, resp_headers, body, reusable = attempt(s)
             if reusable:
