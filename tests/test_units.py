@@ -20,7 +20,9 @@ from feetbrowser.layout import DrawText, get_font, _measure, field_checked, \
 from feetbrowser.browser import (
     Tab, Browser, _AboutURL, _BookmarksURL, _HistoryURL,
     bookmarks_html, history_html,
-    tree_to_list, find_base_href, FormAction, SelectAction, SelectPopup
+    tree_to_list, find_base_href, FormAction, SelectAction, SelectPopup,
+    _tab_slot, TAB_LEFT, TAB_WIDTH, TAB_GAP, TAB_CLOSE_W, TAB_DRAG_SLOP,
+    NEW_TAB_W
 )
 
 
@@ -3124,6 +3126,7 @@ class _SelectBrowser(Browser):
     def __init__(self, tab):
         self.active_tab = tab
         self.focus = None
+        self._tab_drag = None  # _on_escape asks the tab strip first
         self.select_popup = SelectPopup()
         # Real _scroll() tracks velocity, and this double reaches it.
         self._scroll_ticks = []
@@ -4046,6 +4049,242 @@ def test_images_do_not_reach_for_a_third_party_library():
     for module in ("PIL", "PIL.Image", "cairosvg"):
         assert module not in sys.modules, \
             "%s was imported on the way to decoding an image" % module
+
+
+# -- the tab strip: dragging a tab to reorder it -----------------------------
+
+
+class _StripTab:
+    """A stand-in for a Tab on the strip: a name to tell it apart from its
+    neighbours, and the little the release and Escape paths read off a tab
+    once the strip has decided the event is not theirs."""
+
+    def __init__(self, title):
+        self.title = title
+        self.selection = None
+        self.focused_input = None
+
+    def stop_videos(self):
+        pass
+
+    def __repr__(self):
+        return "<tab %s>" % self.title
+
+
+class _TabBrowser(Browser):
+    """A Browser holding a strip of tabs with the painting taken out.
+
+    Every step of the gesture -- the press, the moves, the release, Escape --
+    runs through the real Browser handlers; only the calls that would put
+    pixels on a canvas are counted instead of drawn.
+    """
+
+    def __init__(self, count=4):
+        self.tabs = [_StripTab(chr(ord("A") + i)) for i in range(count)]
+        self.active_tab = self.tabs[0]
+        self.focus = None
+        self.toe_contexts = []
+        self.select_popup = SelectPopup()
+        self.context_menu = type("Menu", (), {"open_": False})()
+        self.downloads_panel = type(
+            "Panel", (), {"point_in": lambda s, x, y: False})()
+        self.window = type("Win", (), {"destroy": lambda s: None})()
+        self._scroll_grab = None
+        self._tab_drag = None
+        self._drag_moved = False
+        self._click_count = 0
+        self.paints = 0
+        self.canvas = type("C", (), {"winfo_width": lambda s: 1000,
+                                     "winfo_height": lambda s: 720})()
+
+    def chrome_height(self):
+        return 80
+
+    def draw(self):
+        self.paints += 1
+
+    def _draw_chrome(self):
+        self.paints += 1
+
+
+def _order(browser):
+    """The strip's tab list, as a string like "BACD"."""
+    return "".join(tab.title for tab in browser.tabs)
+
+
+def _press_tab(browser, i, dx=None):
+    """Press on tab `i`, `dx` pixels in from its left edge (its middle by
+    default). Returns the x the press landed on."""
+    x = TAB_LEFT + i * TAB_GAP + (TAB_WIDTH // 2 if dx is None else dx)
+    browser._on_click(_Ev(x=x, y=20))
+    return x
+
+
+def test_tab_slot_matches_moving_the_tab_in_the_list():
+    """The slots the strip draws mid-drag are exactly the arrangement the
+    drop produces. If the two ever disagreed the tab would land somewhere
+    other than the gap the user was looking at."""
+    names = list("ABCDE")
+    for home in range(len(names)):
+        for target in range(len(names)):
+            dropped = list(names)
+            dropped.insert(target, dropped.pop(home))
+            drawn = [None] * len(names)
+            for j, name in enumerate(names):
+                drawn[_tab_slot(j, home, target)] = name
+            eq(drawn, dropped, f"home={home} target={target}")
+
+
+def test_a_press_and_release_without_moving_is_a_plain_tab_click():
+    browser = _TabBrowser()
+    x = _press_tab(browser, 2)
+    eq(browser.active_tab.title, "C", "the press did not switch tabs")
+    assert browser._tab_drag is not None, "the press armed no drag"
+    browser._on_release(_Ev(x=x, y=20))
+    eq(_order(browser), "ABCD", "a plain click reordered the strip")
+    eq(browser.active_tab.title, "C", "the click lost the tab it selected")
+    assert browser._tab_drag is None, "the gesture outlived the release"
+
+    # And the shake a hand puts into a click is not a drag either.
+    x = _press_tab(browser, 1)
+    browser._on_drag(_Ev(x=x + TAB_DRAG_SLOP - 1, y=20))
+    assert not browser._tab_drag.moved, "jitter under the slop started a drag"
+    browser._on_drag(_Ev(x=x + TAB_DRAG_SLOP, y=20))
+    assert browser._tab_drag.moved, "a real move did not start the drag"
+    browser._on_release(_Ev(x=x + TAB_DRAG_SLOP, y=20))
+    eq(_order(browser), "ABCD", "a few pixels of travel moved the tab")
+
+
+def test_a_press_on_the_close_box_is_still_a_close():
+    browser = _TabBrowser()
+    _press_tab(browser, 1, dx=TAB_WIDTH - TAB_CLOSE_W // 2)
+    eq(_order(browser), "ACD", "the close box stopped closing")
+    assert browser._tab_drag is None, "the close box armed a drag"
+
+
+def test_dragging_a_tab_past_a_neighbour_reorders_it():
+    browser = _TabBrowser()
+    x = _press_tab(browser, 0)
+    half = TAB_GAP // 2
+    browser._on_drag(_Ev(x=x + half - 1, y=20))
+    eq(browser._tab_drag.target, 0, "the drop moved before the midpoint")
+    browser._on_drag(_Ev(x=x + half, y=20))
+    eq(browser._tab_drag.target, 1, "crossing the midpoint moved nothing")
+    eq(_order(browser), "ABCD", "the list moved before the drop")
+    browser._on_release(_Ev(x=x + half, y=20))
+    eq(_order(browser), "BACD", "the tab did not land where the gap was")
+    eq(browser.active_tab.title, "A", "the dragged tab stopped being active")
+    eq(browser.tabs.index(browser.active_tab), 1, "...at its new place")
+    assert browser._tab_drag is None, "the drag outlived the drop"
+
+
+def test_the_other_tabs_shift_to_show_where_the_drop_lands():
+    browser = _TabBrowser()
+    x = _press_tab(browser, 0)
+    browser._on_drag(_Ev(x=x + 2 * TAB_GAP, y=20))
+    eq(browser._tab_drag.target, 2, "two strides right is two slots along")
+    places = {tab.title: px for tab, px, _drag in browser._tab_positions()}
+    eq(places["B"], browser._tab_x(0), "B did not shift into the hole")
+    eq(places["C"], browser._tab_x(1), "C did not shift into the hole")
+    eq(places["D"], browser._tab_x(3), "D moved with no reason to")
+    eq(places["A"], TAB_LEFT + 2 * TAB_GAP, "the tab left the pointer")
+    carried, _px, dragged = browser._tab_positions()[-1]
+    eq(carried.title, "A", "the carried tab is painted under its neighbours")
+    assert dragged, "the carried tab is not marked as the one being carried"
+
+    # Back the way it came: the strip closes up again without a release.
+    browser._on_drag(_Ev(x=x, y=20))
+    eq(browser._tab_drag.target, 0, "coming back did not undo the shift")
+    places = {tab.title: px for tab, px, _drag in browser._tab_positions()}
+    eq(places, {name: browser._tab_x(i)
+                for i, name in enumerate("ABCD")},
+       "the strip did not close up again")
+
+
+def test_a_carried_tab_is_clamped_to_the_strip():
+    browser = _TabBrowser()
+    x = _press_tab(browser, 2)
+    browser._on_drag(_Ev(x=x - 10 * TAB_GAP, y=20))
+    eq(browser._tab_drag.left(), TAB_LEFT, "carried off the left end")
+    eq(browser._tab_drag.target, 0, "the drop is not the first slot")
+    browser._on_drag(_Ev(x=x + 10 * TAB_GAP, y=20))
+    eq(browser._tab_drag.left(), TAB_LEFT + 3 * TAB_GAP,
+       "carried off the right end")
+    eq(browser._tab_drag.target, 3, "the drop is not the last slot")
+    browser._on_release(_Ev(x=x + 10 * TAB_GAP, y=20))
+    eq(_order(browser), "ABDC", "a tab dragged off the end did not land last")
+
+
+def test_escape_puts_a_dragged_tab_back_where_it_started():
+    browser = _TabBrowser()
+    x = _press_tab(browser, 3)
+    browser._on_drag(_Ev(x=x - 2 * TAB_GAP, y=20))
+    eq(browser._tab_drag.target, 1, "the strip is not showing a drop")
+    Browser._on_escape(browser, None)
+    assert browser._tab_drag is None, "the drag survived Escape"
+    eq(_order(browser), "ABCD", "Escape moved the tab anyway")
+    eq([px for _t, px, _d in browser._tab_positions()],
+       [browser._tab_x(i) for i in range(4)],
+       "the strip did not settle back into its plain geometry")
+    # The user still has the button down; the release that follows must not
+    # drop a tab that has already gone home.
+    browser._on_release(_Ev(x=x - 2 * TAB_GAP, y=20))
+    eq(_order(browser), "ABCD", "the release after Escape moved the tab")
+
+
+def test_a_drag_that_loses_the_pointer_is_cancelled_not_dropped():
+    """A release delivered somewhere we never see it (the grab was broken)
+    would otherwise leave a tab stuck to the pointer for the rest of the
+    session. The next press is where that is noticed, and the tab goes back
+    rather than landing at a place the user may never have seen it reach."""
+    browser = _TabBrowser()
+    x = _press_tab(browser, 0)
+    browser._on_drag(_Ev(x=x + 2 * TAB_GAP, y=20))
+    # The press that notices lands on bare strip -- right of the last tab and
+    # clear of the "+" -- so nothing else claims it and the only thing that
+    # can put the tab back is the cancel.
+    browser._on_click(_Ev(x=browser._new_tab_x() + NEW_TAB_W + 20, y=20))
+    assert browser._tab_drag is None, "the hanging drag survived a new press"
+    browser._on_release(_Ev(x=x + 2 * TAB_GAP, y=20))
+    eq(_order(browser), "ABCD", "the lost drag dropped the tab anyway")
+    eq(browser.active_tab.title, "A", "the cancelled drag lost its tab")
+    # A press on another tab still does what a press on a tab does.
+    _press_tab(browser, 3)
+    eq(browser.active_tab.title, "D", "the new press did not select its tab")
+    assert browser._tab_drag is not None, "the new press armed no drag"
+
+    # A tab list that changes under a running drag (Ctrl-W, Ctrl-T) invalidates
+    # it too: the indices it holds no longer mean what they did.
+    browser = _TabBrowser()
+    x = _press_tab(browser, 0)
+    browser._on_drag(_Ev(x=x + 2 * TAB_GAP, y=20))
+    browser.close_tab()
+    assert browser._tab_drag is None, "the drag survived the strip changing"
+    browser._on_release(_Ev(x=x + 2 * TAB_GAP, y=20))
+    eq(_order(browser), "BCD", "the stale drag moved a tab after the close")
+
+
+def test_reordering_leaves_no_stale_tab_index():
+    """Nothing keeps a tab index between events -- close_tab, _cycle_tab and
+    _next_tab each ask self.tabs.index() at the moment they need one -- so
+    every one of them has to walk the new order after a drop, and the active
+    tab has to still be the tab that was dragged."""
+    browser = _TabBrowser()
+    x = _press_tab(browser, 0)
+    browser._on_drag(_Ev(x=x + 2 * TAB_GAP, y=20))
+    browser._on_release(_Ev(x=x + 2 * TAB_GAP, y=20))
+    eq(_order(browser), "BCAD", "the drop")
+    eq(browser.active_tab.title, "A", "the dragged tab stopped being active")
+    browser._cycle_tab(1)
+    eq(browser.active_tab.title, "D", "Ctrl-Tab walked the old order")
+    browser._cycle_tab(-1)
+    eq(browser.active_tab.title, "A", "Ctrl-Shift-Tab walked the old order")
+    browser._next_tab(-1)
+    eq(browser.active_tab.title, "C", "Ctrl-PageUp walked the old order")
+    browser.close_tab()
+    eq(_order(browser), "BAD", "closing took the wrong tab")
+    eq(browser.active_tab.title, "A",
+       "closing handed the strip to the tab at the old index")
 
 
 def main():

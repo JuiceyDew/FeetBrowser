@@ -2522,6 +2522,58 @@ def test_a_press_in_the_scrollbar_gutter_starts_no_selection():
         shutil.rmtree(work, ignore_errors=True)
 
 
+def test_dragging_a_tab_paints_it_under_the_pointer():
+    """Press a tab and carry it two places along, then look at the strip:
+    the tab is painted where the pointer took it, the tabs it passed have
+    shifted back into the hole it left, and the drop lands it there."""
+    from feetbrowser import browser as browsermod
+    from feetbrowser import toes
+    from feetbrowser.canvas import color
+
+    browser = browsermod.Browser()
+    try:
+        for _ in range(3):
+            browser.new_tab("about:blank")
+        first, second = browser.tabs[0], browser.tabs[1]
+        top = toes.band_height(browser.chrome_bands())
+        active = color(browser.c("tab_active"))
+        inactive = color(browser.c("tab_inactive"))
+        strip = color(browser.c("tab_bar"))
+        gap = browsermod.TAB_GAP
+
+        def fill(slot, dy=20):
+            """The colour painted in the middle of slot `slot`."""
+            x = browsermod.TAB_LEFT + slot * gap + browsermod.TAB_WIDTH // 2
+            return _pixel(browser.canvas.render(), x, top + dy)
+
+        # A press picks the tab up and makes it active, so the active fill is
+        # what marks where it has got to from here on.
+        x = browsermod.TAB_LEFT + browsermod.TAB_WIDTH // 2
+        browser._on_click(Event(x=x, y=top + 20))
+        assert browser.active_tab is first, "the press did not select the tab"
+        assert fill(0) == active, "the pressed tab is not the active one"
+
+        browser._on_drag(Event(x=x + 2 * gap, y=top + 20))
+        assert fill(2) == active, \
+            f"the carried tab is not under the pointer: {fill(2)}"
+        assert fill(0) == inactive, \
+            f"the tab it passed did not shift into the hole: {fill(0)}"
+        assert fill(2, dy=3) == active, \
+            "the carried tab is not drawn standing above its neighbours"
+        assert fill(0, dy=3) == strip, \
+            "a tab that is not being carried should not stand up"
+        assert browser.tabs[0] is first, "the list moved before the drop"
+
+        browser._on_release(Event(x=x + 2 * gap, y=top + 20))
+        assert browser.tabs.index(first) == 2, \
+            "the tab did not land where the strip said it would"
+        assert browser.tabs.index(second) == 0, "the strip did not close up"
+        assert browser.active_tab is first, "the dragged tab is not active"
+        assert fill(2) == active, "the tab is not painted in its new slot"
+    finally:
+        browser.window.destroy()
+
+
 # -- video: containers and codecs ------------------------------------------
 #
 # Everything below reads bytes this file wrote, so an assertion about a pixel

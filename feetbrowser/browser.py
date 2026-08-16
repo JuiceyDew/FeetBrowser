@@ -54,6 +54,11 @@ TAB_GAP = 160  # stride between tab left edges (TAB_WIDTH + 2px gutter)
 TAB_CLOSE_W = 20  # hit width of the per-tab "×" close box
 NEW_TAB_W = 34  # hit width of the "+" new-tab button
 MENU_BTN_W = 26  # hit width of the hamburger settings button
+# How far the pointer has to travel before a press on a tab becomes a drag.
+# Small enough that a deliberate move starts one at once, large enough that
+# the jitter a hand puts into a click never turns switching tabs into
+# rearranging them.
+TAB_DRAG_SLOP = 5
 SCROLLBAR_RIGHT = 10  # the thumb's left edge, measured back from the right
 SCROLLBAR_W = 6  # the thumb's drawn width
 SCROLLBAR_MIN_THUMB = 30  # a thumb shorter than this is too small to grab
@@ -2878,6 +2883,70 @@ def _elide(text, font, width):
     return text + "…"
 
 
+def _tab_slot(j, home, target):
+    """Which slot tab `j` is drawn in while the tab from `home` is being
+    carried over `target`.
+
+    This is the arrangement ``tabs.insert(target, tabs.pop(home))`` would
+    produce, worked out without disturbing the list: everything the dragged
+    tab has passed shuffles one slot back towards the hole it left behind.
+    """
+    if j == home:
+        return target
+    if home < j <= target:
+        return j - 1
+    if target <= j < home:
+        return j + 1
+    return j
+
+
+class _TabDrag:
+    """A tab being carried along the tab strip.
+
+    The browser's tab list is left alone until the drop, so nothing that reads
+    `browser.tabs` in the middle of the gesture -- a repaint, a toe, a
+    keyboard shortcut -- ever sees a half-finished reorder, and cancelling is
+    just forgetting this object. `home` is the index the tab came from and
+    `target` the slot it would land in if the pointer let go now; the two are
+    equal until the pointer carries it past a neighbour.
+    """
+
+    def __init__(self, home, press_x, grab, count):
+        self.home = home
+        self.press_x = press_x  # where the press landed; the slop is from here
+        self.grab = grab  # how far into the tab the pointer went down
+        self.count = count  # tabs on the strip when the gesture began
+        self.x = press_x
+        self.moved = False  # past the slop: a reorder, not a click
+        self.target = home
+
+    def track(self, x):
+        """Follow the pointer to `x`. True once this is a drag rather than a
+        click that has not moved yet."""
+        self.x = x
+        if abs(x - self.press_x) >= TAB_DRAG_SLOP:
+            # Once a gesture is a drag it stays one, even if the pointer
+            # wanders back to where it started: what happens on release is
+            # settled by the first real movement, not by the last.
+            self.moved = True
+        if self.moved:
+            self.target = self._target()
+        return self.moved
+
+    def left(self):
+        """Left edge of the dragged tab, clamped to the strip so the tab can
+        be carried past either end without being drawn off it."""
+        return min(max(self.x - self.grab, TAB_LEFT),
+                   TAB_LEFT + (self.count - 1) * TAB_GAP)
+
+    def _target(self):
+        """The slot the dragged tab is over: the nearest one to where it is
+        drawn, which -- every tab being the same width -- means the target
+        changes exactly as the dragged tab crosses a neighbour's midpoint."""
+        slot = (self.left() - TAB_LEFT + TAB_GAP // 2) // TAB_GAP
+        return int(max(0, min(self.count - 1, slot)))
+
+
 class Browser:
     # How far back _track_scroll_velocity reads. Long enough to hold the
     # several ticks one flick of a wheel sends, short enough that a pause
@@ -2901,6 +2970,9 @@ class Browser:
         # Scrollbar drag: how far below the top of the thumb the pointer went
         # down, so the grabbed point stays under it. None when not dragging.
         self._scroll_grab = None
+        # The tab being dragged along the tab strip, or None between
+        # gestures. See _TabDrag: the reorder itself only happens on the drop.
+        self._tab_drag = None
         self._resize_after = None
         self._last_size = (WIDTH, HEIGHT)
         # Multi-click tracking for word/line selection. No platform backend
@@ -3050,8 +3122,67 @@ class Browser:
         return min(TAB_LEFT + len(self.tabs) * TAB_GAP,
                    max(TAB_LEFT, self.canvas.winfo_width() - NEW_TAB_W))
 
+    def _tab_positions(self):
+        """(tab, x, dragged) for every tab, in the order they are painted.
+
+        With no drag running this is the strip's plain geometry. During one
+        the tabs the dragged tab has passed sit in the slot it vacated, so the
+        gap that opens up shows where a release would put it before the user
+        commits to it, and the dragged tab itself comes last -- it follows the
+        pointer, and it has to ride over its neighbours rather than under.
+        """
+        drag = self._tab_drag
+        if drag is None or not drag.moved:
+            return [(tab, self._tab_x(i), False)
+                    for i, tab in enumerate(self.tabs)]
+        out = [(tab, self._tab_x(_tab_slot(j, drag.home, drag.target)), False)
+               for j, tab in enumerate(self.tabs) if j != drag.home]
+        out.append((self.tabs[drag.home], drag.left(), True))
+        return out
+
+    def _drop_tab(self):
+        """End a tab drag, leaving the tab in the slot the strip has been
+        showing it in.
+
+        A gesture that never passed the slop was a click, and the press
+        already switched to that tab, so there is nothing left to do for it.
+        """
+        drag = self._tab_drag
+        self._tab_drag = None
+        if not drag.moved:
+            return
+        if drag.target != drag.home:
+            self.tabs.insert(drag.target, self.tabs.pop(drag.home))
+        # The move is over the list of tabs themselves, and what is active is
+        # a tab and not a position, so the active tab stays active across it.
+        # Nothing else keeps a tab index between events either -- close_tab,
+        # _cycle_tab and _next_tab all ask self.tabs.index() at the moment
+        # they need one -- so there is no stale index left pointing at
+        # whichever tab has moved into the old one's place.
+        self.draw()
+
+    def _cancel_tab_drag(self):
+        """Abandon a tab drag, putting the strip back in the order it started
+        in; True if there was one to abandon.
+
+        Nothing has moved in self.tabs yet (see _TabDrag), so undoing the
+        gesture is forgetting it and painting the strip again.
+        """
+        if self._tab_drag is None:
+            return False
+        moved = self._tab_drag.moved
+        self._tab_drag = None
+        if moved:
+            self._draw_chrome()
+        return True
+
     def new_tab(self, url, focus_address=False):
         self._dismiss_select_popup()
+        # A tab appearing under a running drag would leave that drag holding
+        # indices into a strip that has changed shape, so the gesture is
+        # abandoned rather than applied to the wrong tab. Ctrl-T mid-drag is
+        # the way to get here; the pointer grab keeps clicks from doing it.
+        self._tab_drag = None
         tab = Tab(self.tab_height(), self)
         page = self._coerce_url(url)
         if isinstance(page, _AboutURL):
@@ -3070,6 +3201,7 @@ class Browser:
         if not self.active_tab:
             return
         self._dismiss_select_popup()
+        self._tab_drag = None  # same reason as new_tab: the strip changed
         idx = self.tabs.index(self.active_tab)
         self.active_tab.stop_videos()
         self.tabs.remove(self.active_tab)
@@ -3263,6 +3395,12 @@ class Browser:
         # left the window at the wrong moment) must not leave the bar stuck
         # to the pointer for the rest of the session.
         self._scroll_grab = None
+        # A tab drag is in the same position, and worse: a press arriving
+        # while one is running means the release that should have ended it
+        # went somewhere we never saw (the pointer grab was broken), so the
+        # tab is put back where it came from rather than dropped at a place
+        # the user may never have seen it reach.
+        self._cancel_tab_drag()
         if e.y < self.chrome_height():
             self._chrome_click(e.x, e.y, was_address)
             return
@@ -3379,6 +3517,9 @@ class Browser:
             self.new_tab(str(dest))
 
     def _on_release(self, e):
+        if self._tab_drag is not None:
+            self._drop_tab()
+            return
         if self._scroll_grab is not None:
             # Letting go anywhere -- inside the window or well outside it --
             # ends the drag and leaves the page where the bar put it.
@@ -3405,6 +3546,17 @@ class Browser:
             self._publish_primary(tab.selected_text())
 
     def _on_drag(self, e):
+        if self._tab_drag is not None:
+            # The tab strip holds the pointer for the length of the gesture:
+            # follow it wherever it has got to (both backends keep sending
+            # drags to the window the press went to, so e.x may be off either
+            # end of the strip) and repaint the chrome, which is what shows
+            # the carried tab and the hole it would drop into. Nothing below
+            # can also be running: the press that armed this went to the
+            # chrome, so it anchored no selection and grabbed no scrollbar.
+            if self._tab_drag.track(e.x):
+                self._draw_chrome()
+            return
         if self._scroll_grab is not None:
             # Dragging the scrollbar, wherever the pointer has got to by now:
             # both backends keep sending the drag to the window the press
@@ -3453,7 +3605,13 @@ class Browser:
                         self.active_tab = tab
                         self.close_tab()
                         return
+                    # A press on the body of a tab switches to it at once, the
+                    # way every browser does, and arms a drag at the same
+                    # time: which of the two the gesture is only becomes clear
+                    # once the pointer has moved, or been let go without
+                    # moving, so both are prepared for here.
                     self.active_tab = tab
+                    self._tab_drag = _TabDrag(i, x, x - x0, len(self.tabs))
                     self.draw()
                     return
             # New-tab button (right of the last tab).
@@ -4120,6 +4278,12 @@ class Browser:
             self.address_view = caret_x - box_w + 8
 
     def _on_escape(self, e):
+        # A drag in progress owns Escape: the key that backs out of a menu or
+        # a drop-down also puts a half-carried tab back where it came from,
+        # and it has to be asked first because the drag is the thing the
+        # pointer and the eye are both on.
+        if self._cancel_tab_drag():
+            return
         if self.select_popup.open_:
             self._close_select_popup()
         elif self.context_menu.open_:
@@ -4576,10 +4740,14 @@ class Browser:
         top = toes.band_height(self.chrome_bands())
         c.create_rectangle(0, top, c.winfo_width(), top + 40,
                            fill=self.c("tab_bar"), width=0)
-        for i, tab in enumerate(self.tabs):
-            x0 = self._tab_x(i)
+        for tab, x0, dragged in self._tab_positions():
             active = tab is self.active_tab
-            c.create_rectangle(x0, top + 4, x0 + TAB_WIDTH, top + 40,
+            # A tab being carried is drawn a couple of pixels taller than the
+            # ones it is passing over, which is the whole of "picked up": it
+            # is already painted last, so the extra lip is what makes the
+            # overlap read as one tab above another.
+            c.create_rectangle(x0, top + (2 if dragged else 4),
+                               x0 + TAB_WIDTH, top + 40,
                                fill=self.c("tab_active" if active
                                            else "tab_inactive"),
                                width=0)
