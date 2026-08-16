@@ -15,6 +15,8 @@ import time
 import urllib.parse
 import zlib
 
+from feetbrowser.h2 import H2Connection, H2Error
+
 # A tiny in-process cache keyed by URL string. Honors a very small subset of
 # Cache-Control (max-age). Good enough to avoid re-fetching stylesheets.
 _CACHE = {}
@@ -111,6 +113,54 @@ def _pool_park(key, s):
         if len(lst) >= _CONN_POOL_MAX_PER_ORIGIN:
             _close_socket(lst.pop(0)[0])
         lst.append((s, time.time()))
+
+
+# Multiplexed HTTP/2 connections, keyed by origin. Unlike the HTTP/1.1 pool,
+# a connection is not taken out of service while a request is in flight: many
+# streams share it, so several threads can hold the same H2Connection and make
+# concurrent requests at once. The lock only guards the dict, and a dead
+# connection (peer GOAWAY, socket failure) is dropped so the next request to
+# that origin starts fresh.
+_H2_POOL = {}
+_H2_LOCK = threading.Lock()
+
+
+def _h2_take(origin):
+    with _H2_LOCK:
+        conn = _H2_POOL.get(origin)
+        if conn is None:
+            return None
+        if conn.dead:
+            del _H2_POOL[origin]
+            return None
+        return conn
+
+
+def _h2_park(origin, conn):
+    with _H2_LOCK:
+        existing = _H2_POOL.get(origin)
+        if existing is not None and existing is not conn and not existing.dead:
+            # Another thread won the race to open a fresh connection; ours is
+            # redundant, so close it and keep using the live one.
+            conn.close()
+            return
+        _H2_POOL[origin] = conn
+
+
+def _h2_drop(origin, conn):
+    with _H2_LOCK:
+        if _H2_POOL.get(origin) is conn:
+            del _H2_POOL[origin]
+    conn.close()
+
+
+def _alpn_proto(s):
+    """The protocol a TLS socket negotiated, or None (plain TCP, or a Python
+    build without ALPN support)."""
+    try:
+        return s.selected_alpn_protocol()
+    except (AttributeError, OSError):
+        return None
 
 
 def _resolve(host, port, timeout=None):
@@ -537,6 +587,10 @@ class URL:
         s = _connect(self.host, self.port)
         if self.scheme == "https":
             ctx = ssl.create_default_context()
+            try:
+                ctx.set_alpn_protocols(["h2", "http/1.1"])
+            except (NotImplementedError, ssl.SSLError):
+                pass  # a Python/OpenSSL build without ALPN stays HTTP/1.1
             s = ctx.wrap_socket(s, server_hostname=self.host)
         # Guard against a server that streams forever / stalls: bound each
         # recv() call so a dead or hostile peer can't hang the UI.
@@ -571,43 +625,9 @@ class URL:
             headers["Content-Type"] = "application/x-www-form-urlencoded"
             headers["Content-Length"] = str(len(body_bytes))
 
-        lines = "\r\n".join(f"{k}: {v}" for k, v in headers.items())
-        req = f"{method} {self.path} HTTP/1.1\r\n{lines}\r\n\r\n"
-
-        def attempt(s):
-            try:
-                s.sendall(req.encode("utf8") + body_bytes)
-            except OSError:
-                _close_socket(s)
-                raise
-            return self._read_response(s)
-
         origin = (self.scheme, self.host, self.port)
-        s = _pool_take(origin)
-        pooled = s is not None
-        try:
-            if s is None:
-                s = self._new_connection()
-            try:
-                status, resp_headers, body, reusable = attempt(s)
-            except (OSError, RuntimeError):
-                _close_socket(s)
-                if not pooled:
-                    raise
-                # The parked connection went stale (the peer closed it, e.g.
-                # an HTTP/1.0 server or a keep-alive timeout): retry once on
-                # a fresh connection rather than failing the request.
-                s = self._new_connection()
-                status, resp_headers, body, reusable = attempt(s)
-            if reusable:
-                _pool_park(origin, s)
-            else:
-                # Body was read to EOF (no framing), so the connection cannot
-                # be reused; it is already closed by the peer.
-                _close_socket(s)
-        except BaseException:
-            _close_socket(s)
-            raise
+        status, resp_headers, body = self._request_transport(
+            origin, method, headers, body_bytes)
 
         # Redirects.
         if status in (301, 302, 303, 307, 308) and "location" in resp_headers:
@@ -670,6 +690,86 @@ class URL:
                 _CACHE[cache_key] = (expires, result)
 
         return result
+
+    def _request_transport(self, origin, method, headers, body_bytes):
+        """Run one request over whatever protocol the server negotiated.
+
+        Returns (status, resp_headers, body). Reuses a multiplexed HTTP/2
+        connection when this origin has one, or upgrades a fresh TLS socket to
+        HTTP/2 when ALPN negotiated it; everything else stays on HTTP/1.1.
+        """
+        req = URL._h1_request_bytes(method, self.path, headers, body_bytes)
+
+        def attempt(sock):
+            try:
+                sock.sendall(req)
+            except OSError:
+                _close_socket(sock)
+                raise
+            return self._read_response(sock)
+
+        # HTTP/2: a multiplexed connection already parked for this origin, or
+        # a fresh one whose TLS handshake negotiated h2.
+        if self.scheme == "https":
+            conn = _h2_take(origin)
+            if conn is not None:
+                try:
+                    return conn.request(method, self.path, headers, body_bytes)
+                except (H2Error, OSError):
+                    # The multiplexed connection died under us; drop it and
+                    # fall through to a fresh one rather than failing.
+                    _h2_drop(origin, conn)
+            s = self._new_connection()
+            if _alpn_proto(s) == "h2":
+                conn = H2Connection(s, _MAX_BODY_BYTES)
+                conn.start()
+                try:
+                    result = conn.request(method, self.path, headers,
+                                          body_bytes)
+                except (H2Error, OSError):
+                    _close_socket(s)
+                    raise
+                _h2_park(origin, conn)
+                return result
+        else:
+            s = self._new_connection()
+
+        # HTTP/1.1: reuse a parked socket when one is available, retrying once
+        # on a fresh connection if a parked one went stale.
+        pooled = False
+        if s is None:
+            s = _pool_take(origin)
+            pooled = s is not None
+        if s is None:
+            s = self._new_connection()
+        try:
+            try:
+                status, resp_headers, body, reusable = attempt(s)
+            except (OSError, RuntimeError):
+                _close_socket(s)
+                if not pooled:
+                    raise
+                # The parked connection went stale (the peer closed it, e.g.
+                # an HTTP/1.0 server or a keep-alive timeout): retry once on
+                # a fresh connection rather than failing the request.
+                s = self._new_connection()
+                status, resp_headers, body, reusable = attempt(s)
+            if reusable:
+                _pool_park(origin, s)
+            else:
+                # Body was read to EOF (no framing), so the connection cannot
+                # be reused; it is already closed by the peer.
+                _close_socket(s)
+        except BaseException:
+            _close_socket(s)
+            raise
+        return status, resp_headers, body
+
+    @staticmethod
+    def _h1_request_bytes(method, path, headers, body_bytes):
+        lines = "\r\n".join(f"{k}: {v}" for k, v in headers.items())
+        return (f"{method} {path} HTTP/1.1\r\n{lines}\r\n\r\n"
+                .encode("utf8")) + body_bytes
 
     @staticmethod
     def _read_response(s):

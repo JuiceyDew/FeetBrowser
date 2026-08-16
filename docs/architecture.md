@@ -9,6 +9,11 @@ WebKit, Gecko, or any HTTP library; it implements its own:
   redirect following, `gzip`/`deflate` decoding, chunked transfer decoding,
   plus `data:`, `file:` and `view-source:` schemes, a small bounded response
   cache, and a keep-alive connection pool that reuses sockets per origin.
+  When the server negotiates it over ALPN, the same sockets speak HTTP/2
+  (RFC 7540): HPACK header compression (RFC 7541) and the frame types a
+  client needs are implemented from scratch in this repo, and a page's
+  resources share one multiplexed connection instead of each opening its
+  own.
 - **HTML parser**: a tokenizer + tree builder producing a real DOM
   (entities, comments, void elements, raw-text `<script>`/`<style>`, and
   implicit `<html>`/`<head>`/`<body>` + `<li>`/`<p>`/`<tr>` insertion, plus

@@ -4578,6 +4578,469 @@ def test_a_toe_flag_that_wants_a_name_and_has_none_is_an_error():
         assert flag in out, "%s did not say how to use it: %r" % (flag, out)
 
 
+# -- HTTP/2 and HPACK -------------------------------------------------------
+
+
+def test_hpack_huffman_round_trips_and_matches_the_rfc_vectors():
+    """Huffman is the part of HPACK where a single wrong bit makes a header
+    block undecodable, so the encoder and decoder are pinned to the exact
+    byte strings of RFC 7541 Appendix C.4/C.6, plus a round-trip across the
+    whole byte range."""
+    from feetbrowser.hpack import huffman_encode, huffman_decode, HpackError
+    vectors = {
+        b"www.example.com": "f1e3c2e5f23a6ba0ab90f4ff",
+        b"no-cache": "a8eb10649cbf",
+        b"custom-key": "25a849e95ba97d7f",
+        b"custom-value": "25a849e95bb8e8b4bf",
+        b"302": "6402",
+        b"307": "640eff",
+        b"private": "aec3771a4b",
+        b"gzip": "9bd9ab",
+        b"Mon, 21 Oct 2013 20:13:21 GMT": (
+            "d07abe941054d444a8200595040b8166e082a62d1bff"),
+    }
+    for raw, hexed in vectors.items():
+        eq(huffman_encode(raw).hex(), hexed, f"encode {raw!r}")
+        eq(huffman_decode(bytes.fromhex(hexed)), raw, f"decode {hexed!r}")
+    # Round-trip every octet value, the strings that exercise the padding
+    # rules, and a long ASCII string whose code grows past one byte.
+    for raw in [bytes(range(256)), b"", b"a" * 300, b"GET /index.html HTTP/1.1",
+                b"\x00\xff\x7f\x80"]:
+        eq(huffman_decode(huffman_encode(raw)), raw, f"round trip {raw[:20]!r}")
+    # Padding longer than 7 bits or not matching the EOS prefix is an error.
+    for bad in [b"\xff" * 4, bytes([0xff, 0xff, 0xff])]:
+        try:
+            huffman_decode(bad)
+            assert False, f"expected HpackError for {bad.hex()!r}"
+        except HpackError:
+            pass
+
+
+def test_hpack_integer_encoding_matches_the_rfc_examples():
+    """Appendix C.1: 10 and 1337 with a 5-bit prefix, 42 at an octet
+    boundary."""
+    from feetbrowser.hpack import _encode_int, _decode_int
+    # 10 fits the 5-bit prefix (0x0a, pattern bits are the caller's).
+    head = _encode_int(10, 5)
+    eq(head, [10], "10 on 5 bits")
+    # 1337: prefix = 31 (0x1f), then 154 (0x9a), then 10 (0x0a).
+    head = _encode_int(1337, 5)
+    eq(head, [0x1f, 0x9a, 0x0a], "1337 on 5 bits")
+    value, pos = _decode_int(bytes(head), 0, 5)
+    eq((value, pos), (1337, 3), "decode 1337")
+    # 42 on an 8-bit prefix is just the byte 0x2a.
+    eq(_encode_int(42, 8), [42], "42 on 8 bits")
+    value, pos = _decode_int(bytes([42]), 0, 8)
+    eq((value, pos), (42, 1), "decode 42")
+
+
+def test_hpack_static_and_literal_forms_match_the_rfc_examples():
+    """Appendix C.2: each of the four header field representations decodes
+    to the right field, and only the indexing form touches the dynamic
+    table."""
+    from feetbrowser.hpack import DynamicTable, decode_header_block
+
+    dt = DynamicTable()
+    got = decode_header_block(
+        bytes.fromhex("400a637573746f6d2d6b65790d637573746f6d2d686561646572"),
+        dt, 4096)
+    eq([(n.decode(), v.decode()) for n, v in got],
+       [("custom-key", "custom-header")], "C.2.1 with indexing")
+    eq(dt.size, 55, "C.2.1 adds to the dynamic table")
+
+    dt = DynamicTable()
+    got = decode_header_block(bytes.fromhex("040c2f73616d706c652f70617468"),
+                              dt, 4096)
+    eq([(n.decode(), v.decode()) for n, v in got],
+       [(":path", "/sample/path")], "C.2.2 without indexing")
+    eq(dt.size, 0, "C.2.2 leaves the dynamic table alone")
+
+    dt = DynamicTable()
+    got = decode_header_block(
+        bytes.fromhex("100870617373776f726406736563726574"), dt, 4096)
+    eq([(n.decode(), v.decode()) for n, v in got],
+       [("password", "secret")], "C.2.3 never indexed")
+    eq(dt.size, 0, "C.2.3 leaves the dynamic table alone")
+
+    dt = DynamicTable()
+    got = decode_header_block(bytes.fromhex("82"), dt, 4096)
+    eq([(n.decode(), v.decode()) for n, v in got],
+       [(":method", "GET")], "C.2.4 indexed")
+
+
+def test_hpack_request_sequences_match_the_rfc_examples():
+    """Appendix C.3/C.4: three consecutive requests, with and without
+    Huffman coding, sharing one dynamic table. The table sizes in the RFC
+    (57 / 110 / 164) must come out exactly right -- they are what proves the
+    eviction and accounting behave."""
+    from feetbrowser.hpack import DynamicTable, decode_header_block
+
+    for label, blocks in [
+        ("C.3", ["828684410f7777772e6578616d706c652e636f6d",
+                 "828684be58086e6f2d6361636865",
+                 "828785bf400a637573746f6d2d6b65790c637573746f6d2d76616c7565"]),
+        ("C.4", ["828684418cf1e3c2e5f23a6ba0ab90f4ff",
+                 "828684be5886a8eb10649cbf",
+                 "828785bf408825a849e95ba97d7f8925a849e95bb8e8b4bf"]),
+    ]:
+        expected = [
+            [(":method", "GET"), (":scheme", "http"), (":path", "/"),
+             (":authority", "www.example.com")],
+            [(":method", "GET"), (":scheme", "http"), (":path", "/"),
+             (":authority", "www.example.com"), ("cache-control", "no-cache")],
+            [(":method", "GET"), (":scheme", "https"),
+             (":path", "/index.html"), (":authority", "www.example.com"),
+             ("custom-key", "custom-value")],
+        ]
+        sizes = [57, 110, 164]
+        dt = DynamicTable()
+        for i, (blk, exp, size) in enumerate(zip(blocks, expected, sizes)):
+            got = decode_header_block(bytes.fromhex(blk), dt, 4096)
+            eq([(n.decode(), v.decode()) for n, v in got], exp,
+               f"{label} request {i + 1}")
+            eq(dt.size, size, f"{label} request {i + 1} table size")
+
+
+def test_hpack_response_sequences_evict_the_dynamic_table():
+    """Appendix C.5/C.6: response sequences under a 256-octet table limit.
+    The second and third responses evict entries to make room; the final
+    table sizes (222 / 222 / 215) are the RFC's own accounting of that."""
+    from feetbrowser.hpack import DynamicTable, decode_header_block
+
+    common = lambda code, date: [
+        (":status", code), ("cache-control", "private"), ("date", date),
+        ("location", "https://www.example.com")]
+    expected = [
+        common("302", "Mon, 21 Oct 2013 20:13:21 GMT"),
+        common("307", "Mon, 21 Oct 2013 20:13:21 GMT"),
+        [(":status", "200"), ("cache-control", "private"),
+         ("date", "Mon, 21 Oct 2013 20:13:22 GMT"),
+         ("location", "https://www.example.com"),
+         ("content-encoding", "gzip"),
+         ("set-cookie",
+          "foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1")],
+    ]
+    sizes = [222, 222, 215]
+    for label, blocks in [
+        ("C.5", ["4803333032580770726976617465611d4d6f6e2c203231204f637420"
+                 "323031332032303a31333a323120474d546e1768747470733a2f2f"
+                 "7777772e6578616d706c652e636f6d",
+                 "4803333037c1c0bf",
+                 "88c1611d4d6f6e2c203231204f637420323031332032303a31333a32"
+                 "3220474d54c05a04677a69707738666f6f3d4153444a4b48514b425a"
+                 "584f5157454f50495541585157454f49553b206d61782d6167653d33"
+                 "3630303b2076657273696f6e3d31"]),
+        ("C.6", ["488264025885aec3771a4b6196d07abe941054d444a8200595040b81"
+                 "66e082a62d1bff6e919d29ad171863c78f0b97c8e9ae82ae43d3",
+                 "4883640effc1c0bf",
+                 "88c16196d07abe941054d444a8200595040b8166e084a62d1bffc05a"
+                 "839bd9ab77ad94e7821dd7f2e6c7b335dfdfcd5b3960d5af27087f36"
+                 "72c1ab270fb5291f9587316065c003ed4ee5b1063d5007"]),
+    ]:
+        dt = DynamicTable(256)
+        for i, (blk, exp, size) in enumerate(zip(blocks, expected, sizes)):
+            got = decode_header_block(bytes.fromhex(blk), dt, 256)
+            eq([(n.decode(), v.decode()) for n, v in got], exp,
+               f"{label} response {i + 1}")
+            eq(dt.size, size, f"{label} response {i + 1} table size")
+
+
+def test_hpack_encoder_round_trips_a_connection_of_requests():
+    """A browser encodes requests, not just decodes responses. The encoder's
+    choices are ours, so there is no RFC byte string to hold it against;
+    instead every block it produces must decode -- on a decoder sharing its
+    dynamic table -- back to the exact header list. That exercises the
+    dynamic/static index selection and the incremental-indexing inserts
+    together."""
+    from feetbrowser.hpack import DynamicTable, encode_header_block, \
+        decode_header_block
+    enc, dec = DynamicTable(), DynamicTable()
+    requests = [
+        [(b":method", b"GET"), (b":scheme", b"https"),
+         (b":path", b"/"), (b":authority", b"www.example.com"),
+         (b"accept", b"*/*")],
+        [(b":method", b"GET"), (b":scheme", b"https"),
+         (b":path", b"/style.css"), (b":authority", b"www.example.com"),
+         (b"accept", b"*/*")],
+        [(b":method", b"POST"), (b":scheme", b"https"),
+         (b":path", b"/form"), (b":authority", b"www.example.com"),
+         (b"content-type", b"application/x-www-form-urlencoded"),
+         (b"content-length", b"11")],
+        [(b":method", b"GET"), (b":scheme", b"https"),
+         (b":path", b"/page"), (b":authority", b"www.example.com"),
+         (b"cookie", b"session=abc123")],
+    ]
+    for i, req in enumerate(requests):
+        block = encode_header_block(req, enc)
+        got = decode_header_block(block, dec, 4096)
+        eq(got, req, f"request {i + 1} round trip")
+        eq(enc.size, dec.size, "encoder and decoder tables stay in lockstep")
+
+
+def _h2_server(responses, log=None):
+    """A minimal in-process HTTP/2 server: reads the connection preface,
+    answers SETTINGS, and serves each HEADERS stream with a HEADERS+DATA
+    response. `responses(path)` -> (status, headers, body). Returns (port,
+    socket) for the test to close."""
+    import struct
+    import socket as socket_mod
+    from feetbrowser.hpack import DynamicTable, encode_header_block, \
+        decode_header_block
+    PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+    F_END_STREAM, F_ACK = 0x1, 0x1
+    F_END_HEADERS = 0x4
+    T_HEADERS, T_DATA, T_SETTINGS = 0x1, 0x0, 0x4
+
+    def frame(ftype, flags, stream_id, payload=b""):
+        return (len(payload).to_bytes(3, "big")
+                + bytes((ftype, flags))
+                + struct.pack("!I", stream_id & 0x7FFFFFFF) + payload)
+
+    def read_exact(conn, n):
+        buf = b""
+        while len(buf) < n:
+            chunk = conn.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionError("closed")
+            buf += chunk
+        return buf
+
+    def read_frame(conn):
+        head = read_exact(conn, 9)
+        length = int.from_bytes(head[0:3], "big")
+        ftype, flags = head[3], head[4]
+        stream_id = struct.unpack("!I", head[5:9])[0] & 0x7FFFFFFF
+        return ftype, flags, stream_id, read_exact(conn, length)
+
+    def handle(conn, addr):
+        try:
+            if read_exact(conn, len(PREFACE)) != PREFACE:
+                return
+            conn.sendall(frame(T_SETTINGS, 0, 0, b""))
+            dec, enc = DynamicTable(), DynamicTable()
+            while True:
+                ftype, flags, stream_id, payload = read_frame(conn)
+                if ftype == T_SETTINGS:
+                    conn.sendall(frame(T_SETTINGS, F_ACK, 0, b""))
+                elif ftype == T_HEADERS:
+                    headers = decode_header_block(payload, dec, 4096)
+                    req = {n.decode("latin1"): v.decode("latin1")
+                           for n, v in headers}
+                    path = req.get(":path", "/")
+                    if log is not None:
+                        log.append({"method": req.get(":method", "GET"),
+                                    "path": path,
+                                    "authority": req.get(":authority", ""),
+                                    "headers": req})
+                    status, resp_headers, body = responses(path)
+                    block = encode_header_block(
+                        [(b":status", str(status).encode("ascii"))]
+                        + [(k.encode("latin1"), v.encode("latin1"))
+                           for k, v in resp_headers.items()],
+                        enc)
+                    conn.sendall(frame(T_HEADERS, F_END_HEADERS, stream_id,
+                                       block))
+                    for i in range(0, len(body), 16384):
+                        piece = body[i:i + 16384]
+                        end = F_END_STREAM if i + 16384 >= len(body) else 0
+                        conn.sendall(frame(T_DATA, end, stream_id, piece))
+                elif ftype == 0x7:  # GOAWAY
+                    return
+        except (ConnectionError, OSError):
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    srv = socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_STREAM)
+    srv.setsockopt(socket_mod.SOL_SOCKET, socket_mod.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(16)
+    threading.Thread(target=lambda: _h2_accept_loop(srv, handle),
+                     daemon=True).start()
+    return srv.getsockname()[1], srv
+
+
+def _h2_accept_loop(srv, handle):
+    while True:
+        try:
+            conn, addr = srv.accept()
+        except OSError:
+            return
+        threading.Thread(target=handle, args=(conn, addr), daemon=True).start()
+
+
+def test_h2_client_multiplexes_requests_over_one_connection():
+    """The H2Connection opens a stream per request and lets the reader thread
+    deliver each response to its own stream, so several concurrent requests
+    share one socket. The bodies are sized past the default flow-control
+    window to prove the WINDOW_UPDATE path works, not just the happy path."""
+    import socket as socket_mod
+    from feetbrowser.h2 import H2Connection
+
+    def responses(path):
+        n = int(path.lstrip("/")) if path.lstrip("/").isdigit() else 5
+        return 200, {"content-type": "text/plain"}, b"x" * n
+
+    port, srv = _h2_server(responses)
+    try:
+        sock = socket_mod.create_connection(("127.0.0.1", port))
+        conn = H2Connection(sock, 64 * 1024 * 1024)
+        conn.start()
+        status, headers, body = conn.request("GET", "/", {"host": "x"})
+        eq(status, 200, "simple request status")
+        eq(body, b"xxxxx", "simple request body")
+        results = {}
+        errors = []
+
+        def fetch(name, path):
+            try:
+                _st, _h, b = conn.request("GET", path, {"host": "x"})
+                results[name] = len(b)
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = []
+        for i, size in enumerate([1000, 100000, 5000, 200000, 70000]):
+            t = threading.Thread(target=fetch, args=(i, f"/{size}"))
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join()
+        eq(errors, [], "no concurrent request failed")
+        eq(results, {0: 1000, 1: 100000, 2: 5000, 3: 200000, 4: 70000},
+           "concurrent bodies all arrived intact")
+        conn.close()
+    finally:
+        srv.close()
+
+
+def test_h2_client_sends_the_host_header_as_authority():
+    """HTTP/1.1 puts the netloc in a Host header; HTTP/2 forbids Host and
+    wants it as :authority. The transport passes its headers dict (keyed
+    with a capital H) straight through, so the mapping must be
+    case-insensitive or every h2 request carries an empty authority."""
+    import socket as socket_mod
+    from feetbrowser.h2 import H2Connection
+    seen = []
+
+    def responses(path):
+        return 200, {}, b"ok"
+
+    port, srv = _h2_server(responses, seen)
+    try:
+        sock = socket_mod.create_connection(("127.0.0.1", port))
+        conn = H2Connection(sock, 1024)
+        conn.start()
+        _status, _headers, _body = conn.request(
+            "GET", "/", {"Host": "Example.Com:8443", "Connection": "keep-alive"})
+        eq(len(seen), 1, "request made it to the server")
+        eq(seen[0]["authority"], "Example.Com:8443",
+           "the Host header travels as :authority")
+        assert "host" not in seen[0]["headers"], "Host must not be sent twice"
+        assert "connection" not in seen[0]["headers"], \
+            "connection-specific headers are forbidden in h2"
+        eq(seen[0]["headers"].get(":scheme"), "https",
+           "scheme is supplied as a pseudo-header")
+        conn.close()
+    finally:
+        srv.close()
+
+
+def test_h2_client_fails_cleanly_when_the_peer_resets_or_dies():
+    """A peer that resets the stream, closes the socket, or goes away
+    entirely must surface as an H2Error, not a hang or a raw socket error
+    leaking to the caller."""
+    import socket as socket_mod
+    import struct
+    from feetbrowser.h2 import H2Connection, H2Error
+
+    def frame(ftype, flags, stream_id, payload=b""):
+        return (len(payload).to_bytes(3, "big")
+                + bytes((ftype, flags))
+                + struct.pack("!I", stream_id & 0x7FFFFFFF) + payload)
+
+    # Peer that answers the preface then resets every stream.
+    srv = socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_STREAM)
+    srv.setsockopt(socket_mod.SOL_SOCKET, socket_mod.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    port = srv.getsockname()[1]
+
+    def rst_loop():
+        conn, _ = srv.accept()
+        try:
+            buf = b""
+            while len(buf) < 24:
+                buf += conn.recv(24 - len(buf))
+            conn.sendall(frame(0x4, 0, 0, b""))  # SETTINGS
+            while True:
+                head = b""
+                while len(head) < 9:
+                    chunk = conn.recv(9 - len(head))
+                    if not chunk:
+                        return
+                    head += chunk
+                length = int.from_bytes(head[0:3], "big")
+                ftype = head[3]
+                stream_id = struct.unpack("!I", head[5:9])[0] & 0x7FFFFFFF
+                payload = b""
+                while len(payload) < length:
+                    chunk = conn.recv(length - len(payload))
+                    if not chunk:
+                        return
+                    payload += chunk
+                if ftype == 0x1:  # HEADERS
+                    conn.sendall(frame(0x3, 0, stream_id,
+                                       struct.pack("!I", 8)))  # RST_STREAM
+                elif ftype == 0x7:
+                    return
+        except OSError:
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    threading.Thread(target=rst_loop, daemon=True).start()
+    sock = socket_mod.create_connection(("127.0.0.1", port))
+    conn = H2Connection(sock, 1024)
+    conn.start()
+    try:
+        conn.request("GET", "/", {"host": "x"})
+        assert False, "expected H2Error for a reset stream"
+    except H2Error as exc:
+        assert "reset" in str(exc).lower(), str(exc)
+    conn.close()
+    srv.close()
+
+    # Peer that accepts the connection and then vanishes.
+    srv = socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_STREAM)
+    srv.setsockopt(socket_mod.SOL_SOCKET, socket_mod.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    port = srv.getsockname()[1]
+
+    def die_loop():
+        conn, _ = srv.accept()
+        conn.close()  # never sends the preface response
+
+    threading.Thread(target=die_loop, daemon=True).start()
+    sock = socket_mod.create_connection(("127.0.0.1", port))
+    conn = H2Connection(sock, 1024)
+    try:
+        conn.start()
+        conn.request("GET", "/", {"host": "x"})
+        assert False, "expected H2Error when the peer dies"
+    except H2Error:
+        pass
+    conn.close()
+    srv.close()
+
+
 def main():
     root = Tk(); root.withdraw()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
