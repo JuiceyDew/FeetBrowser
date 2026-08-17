@@ -236,6 +236,42 @@ def test_modifier_bits_are_tks_three():
     eq(wayland.state_from_xkb(False, False, False), 0)
 
 
+def test_cursor_names_map_to_cursor_shape_shapes():
+    # The browser names what X11 would call the hand and the I-beam; the
+    # compositor wants the cursor-shape-v1 enum values instead.
+    eq(wayland.CURSOR_SHAPES[""], wayland.SHAPE_DEFAULT)
+    eq(wayland.CURSOR_SHAPES["hand2"], wayland.SHAPE_POINTER)
+    eq(wayland.CURSOR_SHAPES["text"], wayland.SHAPE_TEXT)
+    eq(wayland.CURSOR_SHAPES.get("something-else", wayland.SHAPE_DEFAULT),
+       wayland.SHAPE_DEFAULT, "an unknown name falls back to the default")
+
+
+def test_cursor_shape_requests_carry_pointer_serial_and_shape():
+    """_apply_cursor only sends when the shape changes, and the request is
+    the two-word set_shape the compositor expects: pointer, serial, shape."""
+    sent = []
+    conn = type("C", (), {"request": lambda self, oid, op, fmt, v: sent.append(
+        (oid, op, fmt, v))})()
+
+    class Win(wayland.WaylandWindow):
+        def __init__(self):
+            self._conn = conn
+            self.canvas = type("CV", (), {"cursor": "hand2"})()
+            self._closed = False
+            self._cursor_name = None
+
+    wayland._STATE.update(pointer=11, pointer_serial=99,
+                          pointer_shape=22)
+    win = Win()
+    win._apply_cursor()
+    eq(sent, [(22, 0, "ouu", [11, 99, wayland.SHAPE_POINTER])],
+       "the set_shape request names the pointer, serial and shape")
+    # Unchanged shape: nothing sent.
+    sent.clear()
+    win._apply_cursor()
+    eq(sent, [], "an unchanged cursor is not re-sent")
+
+
 def test_keysyms_become_characters():
     """xkbcommon's keysym names and values are X11's, so the shared
     translation from x11.py applies unchanged."""

@@ -58,6 +58,25 @@ WL_SEAT_CAPABILITY_KEYBOARD = 2
 # wl_pointer axis ids.
 WL_POINTER_AXIS_VERTICAL_SCROLL = 0
 
+# cursor-shape-v1: wp_cursor_shape_device_v1.shape values. The compositor
+# draws the pointer, so a client only names the shape it wants -- no cursor
+# images to ship, no libwayland-cursor.
+SHAPE_DEFAULT = 1
+SHAPE_POINTER = 2
+SHAPE_TEXT = 3
+
+# The Tk cursor names browser.py hands the canvas -> the shape above.
+CURSOR_SHAPES = {
+    "": SHAPE_DEFAULT,
+    "arrow": SHAPE_DEFAULT,
+    "hand2": SHAPE_POINTER,
+    "pointer": SHAPE_POINTER,
+    "hand": SHAPE_POINTER,
+    "text": SHAPE_TEXT,
+    "xterm": SHAPE_TEXT,
+    "ibeam": SHAPE_TEXT,
+}
+
 # How many pixels one scroll "notch" moves, matching x11.py and the other
 # backends. browser.py treats |delta| < 30 as pixels.
 WHEEL_STEP = 20
@@ -556,7 +575,9 @@ def _connect():
     conn = _Conn(sock)
     _STATE["conn"] = conn
     _STATE.update(compositor=0, shm=0, xdg_wm_base=0, seat=0,
-                  data_device_manager=0, outputs=[], scale=1.0,
+                  data_device_manager=0, cursor_shape_manager=0,
+                  pointer=0, pointer_shape=0, pointer_serial=0,
+                  outputs=[], scale=1.0,
                   pending_scale=1.0, serial=0)
     registry = conn.new_id("wl_registry")
     conn.request(1, 1, "n", [registry])     # wl_display.get_registry
@@ -597,6 +618,11 @@ def _global(rec, _sid, name, interface, version):
         oid = conn.new_id("wl_data_device_manager")
         conn.request(_sid, 0, "usun", [name, "wl_data_device_manager", 3, oid])
         _STATE["data_device_manager"] = oid
+    elif interface == "wp_cursor_shape_manager_v1":
+        oid = conn.new_id("wp_cursor_shape_manager_v1")
+        conn.request(_sid, 0, "usun",
+                     [name, "wp_cursor_shape_manager_v1", 1, oid])
+        _STATE["cursor_shape_manager"] = oid
 
 
 def _global_remove(rec, _sid, _name):
@@ -696,14 +722,36 @@ def _seat_name(rec, _sid, _name):
     pass
 
 
+def _ensure_pointer_shape():
+    """The zwp_pointer_shape_v1 object for the seat's pointer, created once.
+
+    Returns its id, or 0 when the compositor has no cursor-shape manager --
+    in which case no cursor is set at all and the compositor falls back to
+    its own default, exactly as it did before this existed.
+    """
+    if _STATE.get("pointer_shape"):
+        return _STATE["pointer_shape"]
+    m = _STATE.get("cursor_shape_manager")
+    ptr = _STATE.get("pointer")
+    if not m or not ptr:
+        return 0
+    oid = _conn().new_id("zwp_pointer_shape_v1")
+    _conn().request(m, 0, "no", [oid, ptr])   # cursor_shape_manager.get_pointer
+    _STATE["pointer_shape"] = oid
+    return oid
+
+
 def _pointer_enter(rec, _sid, serial, surface, x, y):
     global _POINTER_WIN
     _STATE["serial"] = serial
+    _STATE["pointer_serial"] = serial
     _POINTER_WIN = _SURFACES.get(surface)
     if _POINTER_WIN is not None:
         win = _POINTER_WIN
         win._pointer_inside = True
         win._last_x, win._last_y = fixed_to_float(x), fixed_to_float(y)
+        _ensure_pointer_shape()
+        win._apply_cursor()
 
 
 def _pointer_leave(rec, _sid, serial, _surface):
@@ -725,6 +773,7 @@ def _pointer_motion(rec, _sid, _time, x, y):
     px, py = win._pointer_css()
     win.dispatch(name, Event(x=px, y=py, num=num,
                              state=_modifier_state(), type=name))
+    win._apply_cursor()
 
 
 def _pointer_button(rec, _sid, serial, _time, button, state):
@@ -1209,6 +1258,7 @@ class WaylandWindow(Window):
         self._axis_notches = 0
         self._axis_discrete_pending = None
         self._button_held = 0
+        self._cursor_name = None
         self._last_x = 0.0
         self._last_y = 0.0
         self.set_scale(_STATE["scale"])
@@ -1361,6 +1411,26 @@ class WaylandWindow(Window):
         if self._closed:
             return
         self._conn.request(self._toplevel, 2, "s", [title])  # set_title
+
+    def _apply_cursor(self):
+        """Honour the pointer the canvas asked for, when it changes.
+
+        The compositor draws the pointer, so naming the shape is a two-word
+        request on the cursor-shape object rather than an image to ship. The
+        serial is the one from the last pointer-enter, which is what lets the
+        compositor tell a stale request from a live one; with no shape object
+        (no cursor-shape manager) nothing is sent and the compositor shows
+        its default."""
+        wanted = getattr(self.canvas, "cursor", "") if self.canvas else ""
+        if wanted == self._cursor_name or self._closed:
+            return
+        self._cursor_name = wanted
+        shape = CURSOR_SHAPES.get(wanted, SHAPE_DEFAULT)
+        oid = _STATE.get("pointer_shape")
+        ptr = _STATE.get("pointer")
+        serial = _STATE.get("pointer_serial")
+        if oid and ptr and serial:
+            self._conn.request(oid, 0, "ouu", [ptr, serial, shape])
 
     def _on_xdg_configure(self, serial):
         """The configure sequence for a state change is complete.
