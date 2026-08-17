@@ -60,91 +60,90 @@ WL_SEAT_CAPABILITY_KEYBOARD = 2
 # wl_pointer axis ids.
 WL_POINTER_AXIS_VERTICAL_SCROLL = 0
 
-# Cursor images, drawn into a small wl_surface and handed to
-# wl_pointer.set_cursor -- the classic, universally supported mechanism (the
-# cursor-shape-v1 protocol this used to speak turned out to be dropped by
-# this KWin, which made the window vanish the moment the pointer entered).
-# Each entry is a 24x24 bitmap: '#' is the filled shape and '.' is clear.
-_CURSOR_ARROW = [
-    "#...............................",
-    "##..............................",
-    "###.............................",
-    "####............................",
-    "#####...........................",
-    "######..........................",
-    "#######.........................",
-    "########........................",
-    "#########.......................",
-    "##########......................",
-    "###########.....................",
-    "############....................",
-    "#############...................",
-    "###############.................",
-    "################................",
-    "###############.##..............",
-    "##############.###..............",
-    "#############..###.............",
-    "############..###..............",
-    "###########..###...............",
-    "##########..###................",
-    "#########..###.................",
-    "########..###..................",
-    "#######..###...................",
-]
-_CURSOR_HAND = [
-    "####............................",
-    "##..##..........................",
-    "#....##.........................",
-    "#.....#.........................",
-    "#.....#.........................",
-    "#....##.........................",
-    "#....##.........................",
-    "#....##.........................",
-    "#....##.........................",
-    "#....##.........................",
-    "#....##.........................",
-    "#....##.........................",
-    "#....##.........................",
-    "#....##.........................",
-    "#....##.........................",
-    "#....##.........................",
-    "#....##.........................",
-    "#...##..........................",
-    "#####...........................",
-]
-_CURSOR_TEXT = [
-    "........##.........",
-    "........##.........",
-    "........##.........",
-    "........##.........",
-    "........##.........",
-    "........##.........",
-    "........##.........",
-    "........##.........",
-    "........##.........",
-    ".......####........",
-    "........##.........",
-    "........##.........",
-    "........##.........",
-    "........##.........",
-    "........##.........",
-    "........##.........",
-    "........##.........",
-    "........##.........",
-    "........##.........",
-    "........##.........",
-]
-# Tk cursor name -> (bitmap, hotspot).
-_CURSOR_IMAGES = {
-    "": (_CURSOR_ARROW, (0, 0)),
-    "arrow": (_CURSOR_ARROW, (0, 0)),
-    "hand2": (_CURSOR_HAND, (2, 0)),
-    "pointer": (_CURSOR_HAND, (2, 0)),
-    "hand": (_CURSOR_HAND, (2, 0)),
-    "text": (_CURSOR_TEXT, (8, 0)),
-    "xterm": (_CURSOR_TEXT, (8, 0)),
-    "ibeam": (_CURSOR_TEXT, (8, 0)),
+# Cursor images come from the system cursor theme, drawn into a small
+# wl_surface and handed to wl_pointer.set_cursor -- the classic, universally
+# supported mechanism (cursor-shape-v1 was tried and this KWin drops the
+# resource). XCursor files are parsed for their ARGB image, so the pointer
+# is the theme's own anti-aliased one rather than something hand-drawn.
+_CURSOR_THEME_DIRS = (
+    os.path.expanduser("~/.icons/breeze_cursors/cursors"),
+    os.path.expanduser("~/.icons/Adwaita/cursors"),
+    "/usr/share/icons/breeze_cursors/cursors",
+    "/usr/share/icons/Adwaita/cursors",
+    "/usr/share/icons/hicolor/cursors",
+    "/usr/share/icons/default/cursors",
+)
+# Tk cursor name -> the XCursor names to try, in order.
+_CURSOR_FILES = {
+    "": ("left_ptr", "arrow", "default"),
+    "arrow": ("left_ptr", "arrow", "default"),
+    "hand2": ("pointer", "hand2", "hand"),
+    "pointer": ("pointer", "hand2", "hand"),
+    "hand": ("pointer", "hand2", "hand"),
+    "text": ("text", "xterm", "ibeam"),
+    "xterm": ("text", "xterm", "ibeam"),
+    "ibeam": ("text", "xterm", "ibeam"),
 }
+_CURSOR_IMAGE_CACHE = {}
+
+
+def _parse_xcursor(path, want):
+    """The cursor image nearest `want` pixels tall from an XCursor file.
+
+    Returns ``(width, height, argb, xhot, yhot)`` where ``argb`` is the
+    raw pixel data, bytes in B G R A order -- the same layout as an
+    ARGB8888 wl_shm buffer, so it can be copied straight in.
+    """
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    if data[:4] != b"Xcur" or len(data) < 16:
+        return None
+    _hs, _ver, ntoc = struct.unpack_from("<III", data, 4)
+    best = None
+    for i in range(ntoc):
+        ctype, subtype, pos = struct.unpack_from("<III", data, 16 + i * 12)
+        if ctype != 0xFFFD0002:  # the image chunk type
+            continue
+        # Chunk header (chunk_size, type, subtype) then the image struct:
+        # version, width, height, xhot, yhot, delay -- 9 words before the
+        # pixels.
+        if pos + 36 > len(data):
+            continue
+        hdr = struct.unpack_from("<IIIIIIIII", data, pos)
+        _csize, _type, _subtype, _version, width, height, xhot, yhot, _d = hdr
+        if width <= 0 or height <= 0:
+            continue
+        diff = abs(subtype - want)
+        if best is None or diff < best[0]:
+            best = (diff, pos, width, height, xhot, yhot)
+    if best is None:
+        return None
+    _diff, pos, width, height, xhot, yhot = best
+    argb = data[pos + 36: pos + 36 + width * height * 4]
+    if len(argb) < width * height * 4:
+        return None
+    return width, height, argb, xhot, yhot
+
+
+def _cursor_image(name, want=24):
+    """(width, height, argb, xhot, yhot) for a Tk cursor name, or None when
+    no theme ships it (in which case no cursor is set and the compositor
+    keeps its own)."""
+    if name in _CURSOR_IMAGE_CACHE:
+        return _CURSOR_IMAGE_CACHE[name]
+    img = None
+    for theme_dir in _CURSOR_THEME_DIRS:
+        for fname in _CURSOR_FILES.get(name, ()):
+            img = _parse_xcursor(os.path.join(theme_dir, fname), want)
+            if img is not None:
+                break
+        if img is not None:
+            break
+    _CURSOR_IMAGE_CACHE[name] = img
+    return img
 
 # How many pixels one scroll "notch" moves, matching x11.py and the other
 # backends. browser.py treats |delta| < 30 as pixels.
@@ -1463,17 +1462,22 @@ class WaylandWindow(Window):
     def _apply_cursor(self):
         """Honour the pointer the canvas asked for, when it changes.
 
-        A small wl_surface holds the cursor bitmap; on pointer enter -- and
-        whenever the browser asks for a different cursor over a link -- the
-        bitmap is drawn into it, committed, and handed to wl_pointer.set_cursor
-        with the enter serial. This is the classic mechanism every compositor
-        speaks (cursor-shape-v1 was tried and this KWin drops the resource).
+        A small wl_surface holds the cursor image from the system cursor
+        theme; on pointer enter -- and whenever the browser asks for a
+        different cursor over a link -- the image is copied into it,
+        committed, and handed to wl_pointer.set_cursor with the enter serial.
+        This is the classic mechanism every compositor speaks (cursor-shape-v1
+        was tried and this KWin drops the resource). With no theme image the
+        compositor keeps its own cursor.
         """
         wanted = getattr(self.canvas, "cursor", "") if self.canvas else ""
         if wanted == self._cursor_name or self._closed:
             return
         self._cursor_name = wanted
-        bitmap, (hx, hy) = _CURSOR_IMAGES.get(wanted, _CURSOR_IMAGES[""])
+        img = _cursor_image(wanted)
+        if img is None:
+            return
+        width, height, argb, hx, hy = img
         ptr = _STATE.get("pointer")
         serial = _STATE.get("pointer_serial")
         if not ptr or not serial:
@@ -1481,18 +1485,16 @@ class WaylandWindow(Window):
         if not self._cursor_surface:
             return
         conn = self._conn
-        if self._draw_cursor(bitmap, hx, hy) is None:
+        if self._draw_cursor(width, height, argb) is None:
             return
         conn.request(ptr, 0, "uoii",
                      [serial, self._cursor_surface, hx, hy])  # set_cursor
 
-    def _draw_cursor(self, bitmap, hx, hy):
-        """Draw `bitmap` into a cursor buffer on the cursor surface.
+    def _draw_cursor(self, width, height, argb):
+        """Copy an ARGB image (B G R A bytes) into a cursor buffer.
 
         Returns the buffer object, or None when no shm buffer could be made
         (no memory) -- in which case the previous cursor stays."""
-        height = len(bitmap)
-        width = max(len(row) for row in bitmap)
         buf = self._cursor_buffer
         if buf is None or buf.width != width or buf.height != height:
             self._release_cursor_buffer()
@@ -1501,18 +1503,7 @@ class WaylandWindow(Window):
                 return None
             self._cursor_buffer = buf
             self._cursor_size = (width, height)
-        mem = buf.mem
-        stride = width * 4
-        for y in range(height):
-            row = bitmap[y]
-            for x in range(width):
-                filled = x < len(row) and row[x] == "#"
-                off = y * stride + x * 4
-                if filled:
-                    mem[off:off + 3] = b"\x00\x00\x00"   # black, BGR
-                    mem[off + 3] = 0xff
-                else:
-                    mem[off:off + 4] = b"\x00\x00\x00\x00"  # clear
+        buf.mem[:] = argb[:width * height * 4]
         conn = self._conn
         conn.request(self._cursor_surface, 1, "oii",
                      [buf.proxy, 0, 0])              # attach
@@ -1522,7 +1513,8 @@ class WaylandWindow(Window):
         return buf.proxy
 
     def _make_cursor_buffer(self, width, height):
-        """A wl_shm buffer for the cursor surface, XRGB8888."""
+        """A wl_shm buffer for the cursor surface, ARGB8888 (the cursor's
+        format needs alpha, or its clear background renders as a box)."""
         size = width * height * 4
         try:
             fd = os.memfd_create("feetbrowser-cursor", 0)

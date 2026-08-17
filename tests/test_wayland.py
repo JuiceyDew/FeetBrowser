@@ -236,25 +236,46 @@ def test_modifier_bits_are_tks_three():
     eq(wayland.state_from_xkb(False, False, False), 0)
 
 
-def test_cursor_names_have_images():
+def test_cursor_images_come_from_the_xcursor_theme():
     # The browser names what X11 would call the arrow, the hand and the
-    # I-beam; each one is a bitmap + hotspot for wl_pointer.set_cursor.
-    arrow, (hx, hy) = wayland._CURSOR_IMAGES[""]
-    hand, _ = wayland._CURSOR_IMAGES["hand2"]
-    text, _ = wayland._CURSOR_IMAGES["text"]
-    eq(len(arrow[0]), 32, "arrow is 32 wide")
-    eq(len(arrow), 24, "arrow is 24 tall")
-    eq(arrow[0][0], "#", "the arrow starts at its hotspot")
-    eq((hx, hy), (0, 0))
-    assert any(r.startswith("#") for r in hand), "the hand is drawn"
-    assert any("#" in r for r in text), "the I-beam is drawn"
-    eq(wayland._CURSOR_IMAGES.get("something-else", wayland._CURSOR_IMAGES[""])[0],
-       arrow, "an unknown name falls back to the default arrow")
+    # I-beam; each resolves to a real image from the system cursor theme
+    # with a hotspot, unless no theme ships one.
+    for name in ("", "hand2", "text"):
+        img = wayland._cursor_image(name)
+        if img is None:
+            continue
+        width, height, argb, hx, hy = img
+        assert width > 0 and height > 0, "a real cursor image has size"
+        eq(len(argb), width * height * 4, "ARGB bytes fill the image")
+        assert any(argb[i + 3] for i in range(0, len(argb), 4)), \
+            "some pixel is opaque"
+        assert (hx, hy) >= (0, 0), "the hotspot is non-negative"
+
+
+def test_xcursor_parser_reads_a_theme_image():
+    # Build a minimal XCursor file by hand: one image chunk (chunk header of
+    # chunk_size/type/subtype, then version/width/height/xhot/yhot/delay),
+    # a 2x2 image with an opaque black pixel at the hotspot and clear
+    # elsewhere.
+    import struct as _struct
+    def pixel(argb):  # ARGB uint32 little-endian -> B,G,R,A bytes
+        return _struct.pack("<I", argb)
+    image = (pixel(0xFF000000) + pixel(0x00000000)
+             + pixel(0x00000000) + pixel(0x00000000))
+    chunk = _struct.pack("<III", 36 + len(image), 0xFFFD0002, 12)
+    chunk += _struct.pack("<IIIIII", 1, 2, 2, 0, 0, 0)
+    chunk += image
+    toc = _struct.pack("<III", 0xFFFD0002, 12, 28)
+    header = _struct.pack("<III", 16, 0x100, 1)
+    blob = b"Xcur" + header + toc + chunk
+    open("/tmp/opencode/test-cursor.xcursor", "wb").write(blob)
+    got = wayland._parse_xcursor("/tmp/opencode/test-cursor.xcursor", 24)
+    eq(got, (2, 2, image, 0, 0), "the image and hotspot parse out")
 
 
 def test_cursor_is_set_via_wl_pointer_set_cursor():
     """_apply_cursor only sends when the shape changes, and the request is
-    wl_pointer.set_cursor (opcode 4): serial, cursor surface, hotspot."""
+    wl_pointer.set_cursor: serial, cursor surface, hotspot."""
     sent = []
     conn = type("C", (), {"request": lambda self, oid, op, fmt, v: sent.append(
         (oid, op, fmt, v))})()
@@ -271,11 +292,14 @@ def test_cursor_is_set_via_wl_pointer_set_cursor():
 
     wayland._STATE.update(pointer=11, pointer_serial=99)
     win = Win()
-    # _draw_cursor is stubbed so the test sees only the set_cursor request.
-    win._draw_cursor = lambda bitmap, hx, hy: 77
+    # _cursor_image and _draw_cursor are stubbed so the test sees only the
+    # set_cursor request.
+    wayland._cursor_image = lambda name: (2, 2, b"\x00" * 16, 0, 0)
+    win._draw_cursor = lambda width, height, argb: 77
     win._apply_cursor()
-    eq(sent, [(11, 0, "uoii", [99, 55, 2, 0])],
+    eq(sent, [(11, 0, "uoii", [99, 55, 0, 0])],
        "set_cursor names the serial, the cursor surface and the hotspot")
+    del wayland._cursor_image
     # Unchanged shape: nothing sent.
     sent.clear()
     win._apply_cursor()
