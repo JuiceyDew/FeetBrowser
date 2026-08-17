@@ -645,6 +645,7 @@ def _connect():
     _STATE.update(compositor=0, shm=0, xdg_wm_base=0, seat=0,
                   data_device_manager=0,
                   pointer=0, pointer_serial=0,
+                  repeat_rate=30, repeat_delay=500,
                   outputs=[], scale=1.0,
                   pending_scale=1.0, serial=0)
     registry = conn.new_id("wl_registry")
@@ -932,24 +933,62 @@ def _keyboard_enter(rec, _sid, serial, surface, _keys):
 def _keyboard_leave(rec, _sid, serial, _surface):
     global _KEYBOARD_WIN
     _STATE["serial"] = serial
+    _cancel_repeat()
     _KEYBOARD_WIN = None
 
 
-def _keyboard_key(rec, _sid, serial, _time, key, state):
-    win = _KEYBOARD_WIN
-    if win is None:
+def _keyboard_repeat_info(rec, _sid, rate, delay):
+    # The compositor names how a held key should repeat; the client is the
+    # one that has to do it (unlike X11, where the server repeats).
+    _STATE["repeat_rate"] = rate
+    _STATE["repeat_delay"] = delay
+
+
+# The one key being held: its timer handle, keycode and enter serial.
+_REPEAT = {"job": None, "key": None, "serial": None, "win": None}
+
+
+def _schedule_repeat(win, key, serial, first=True):
+    """Arm a held key to repeat: once after the delay, then at the rate."""
+    _cancel_repeat()
+    if win._closed:
         return
-    _STATE["serial"] = serial
+    delay = _STATE.get("repeat_delay", 500) if first \
+        else max(1, int(1000.0 / max(1, _STATE.get("repeat_rate", 30))))
+    _REPEAT.update(job=win.after(delay, _repeat_tick), key=key,
+                   serial=serial, win=win)
+
+
+def _repeat_tick():
+    """One repeat: re-dispatch the held key as a press and re-arm."""
+    r = _REPEAT
+    if r["job"] is None:
+        return
+    r["job"] = None
+    win = r["win"]
+    if win is None or win._closed or _KEYBOARD_WIN is not win:
+        _REPEAT.update(job=None, key=None, serial=None, win=None)
+        return
+    _dispatch_key(win, r["key"], r["serial"], pressed=True)
+    _schedule_repeat(win, r["key"], r["serial"], first=False)
+
+
+def _cancel_repeat():
+    """Stop repeating: the key was released, or focus left."""
+    if _REPEAT["job"] is not None:
+        win = _REPEAT["win"]
+        if win is not None and not win._closed:
+            win.after_cancel(_REPEAT["job"])
+    _REPEAT.update(job=None, key=None, serial=None, win=None)
+
+
+def _dispatch_key(win, key, serial, pressed):
+    """Translate and dispatch one key event, press or release."""
     syms = _STATE.get("syms") or {}
     names = _STATE.get("names") or {}
-    # The event's key is the raw hardware scan code; the keymap's keycodes
-    # section numbers the same physical keys a few higher, and parse_keymap
-    # returned how much higher (nothing when it is already evdev-coded).
-    key = key + _STATE.get("shift", 0)
     key_syms = syms.get(key)
     if not key_syms:
         return
-    pressed = state == 1
     _track_modifiers(names.get(key) or [], pressed)
     state_bits = _modifier_state()
     if pressed:
@@ -972,6 +1011,24 @@ def _keyboard_key(rec, _sid, serial, _time, key, state):
         for sequence in key_release_sequences(name):
             if win.dispatch(sequence, obj):
                 return
+
+
+def _keyboard_key(rec, _sid, serial, _time, key, state):
+    win = _KEYBOARD_WIN
+    if win is None:
+        return
+    _STATE["serial"] = serial
+    # The event's key is the raw hardware scan code; the keymap's keycodes
+    # section numbers the same physical keys a few higher, and parse_keymap
+    # returned how much higher (nothing when it is already evdev-coded).
+    key = key + _STATE.get("shift", 0)
+    if state == 1:
+        # A held key repeats on the client's timer (the compositor only
+        # sends the press and the release).
+        _schedule_repeat(win, key, serial)
+    else:
+        _cancel_repeat()
+    _dispatch_key(win, key, serial, bool(state))
 
 
 def _track_modifiers(names, pressed):
@@ -998,10 +1055,6 @@ def _modifier_state():
 def _keyboard_modifiers(rec, _sid, serial, _depressed, _latched, _locked,
                         _group):
     _STATE["serial"] = serial
-
-
-def _keyboard_repeat_info(rec, _sid, _rate, _delay):
-    pass
 
 
 # -- clipboard --------------------------------------------------------------

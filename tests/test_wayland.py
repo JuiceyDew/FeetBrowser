@@ -329,6 +329,38 @@ def test_a_release_cannot_be_caught_by_a_typing_binding():
     assert "<Key>" not in names
 
 
+def test_a_held_key_repeats_at_the_compositor_s_timing():
+    """Wayland leaves key repeat to the client: the compositor sends one
+    press and one release, and repeat_info names the delay and rate the
+    client should use. A held key must therefore repeat on our timer."""
+    from feetbrowser import window as windowmod
+    syms, names, shift = wayland.parse_keymap(KEYMAP)
+    wayland._STATE.update(syms=syms, names=names, shift=shift,
+                          repeat_rate=20, repeat_delay=100)
+    win = windowmod.Window(300, 200, "repeat")
+    win._closed = False  # the wayland window tracks this; the headless root
+                         # is told by the test instead
+    wayland._KEYBOARD_WIN = win
+    wayland._HELD.clear()
+    wayland._CAPS[0] = False
+    seen = []
+    win.bind("<Key>", lambda e: seen.append(e.keysym))
+    try:
+        wayland._keyboard_key(None, 0, 1, 0, 30, 1)   # hold 'a' (AC01=30)
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            win.flush_timers()
+            time.sleep(0.01)
+        wayland._keyboard_key(None, 0, 1, 0, 30, 0)   # release
+    finally:
+        wayland._cancel_repeat()
+        wayland._KEYBOARD_WIN = None
+    assert seen, "the key typed at all: %r" % seen
+    assert len(seen) >= 3, "a held key should repeat: %r" % seen
+    # The first press is immediate; everything after the delay+rate repeats.
+    wayland._HELD.clear()
+
+
 # -- connecting ------------------------------------------------------------
 
 def _live_reason():
