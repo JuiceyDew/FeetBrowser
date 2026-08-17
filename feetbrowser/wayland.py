@@ -804,6 +804,10 @@ def _pointer_leave(rec, _sid, serial, _surface):
     if win is not None:
         win._pointer_inside = False
         win._button_held = 0
+        # Forget the cursor we set: the compositor resets to its own (this
+        # KWin's looks like an I-beam) when the pointer leaves, so the next
+        # enter must re-send rather than seeing "no change" and skipping.
+        win._cursor_name = None
     _POINTER_WIN = None
 
 
