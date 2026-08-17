@@ -375,13 +375,17 @@ def _section(text, name):
 def parse_keymap(text):
     """The parts of a compositor keymap this browser needs.
 
-    Returns ``(syms, names)``, both keyed by keycode: ``syms`` holds the X11
-    keysym values for levels 1 and 2 (unshifted, shifted) and ``names`` the
-    matching names for event reporting. Only the ``xkb_keycodes`` and
-    ``xkb_symbols`` sections are read, and only Group1: that is what a
-    browser needs to type and to navigate, and it deliberately does not
-    chase xkb's compose sequences, level-3 (AltGr) symbols or dead-key
-    composition.
+    Returns ``(syms, names, shift)``: ``syms`` and ``names`` keyed by the
+    keymap's own keycodes (X11 keysym values for levels 1 and 2, and their
+    names), and ``shift`` -- how far the keymap's keycodes sit above the
+    compositor's. The ``wl_keyboard.key`` event carries the raw hardware
+    scan code (linux evdev), while the keymap's keycodes section numbers
+    the same physical keys 8 higher, so the lookup must add that gap. A
+    keymap already written in evdev codes (AC01 at 30) shifts by nothing.
+    Only the ``xkb_keycodes`` and ``xkb_symbols`` sections are read, and
+    only Group1: that is what a browser needs to type and to navigate, and
+    it deliberately does not chase xkb's compose sequences, level-3 (AltGr)
+    symbols or dead-key composition.
     """
     codes = {}
     aliases = {}
@@ -414,7 +418,8 @@ def parse_keymap(text):
             levels = [_level_value(x) for x in level_names[:2]]
             syms[code] = [value for value, _name in levels]
             names[code] = [nm for _value, nm in levels]
-    return syms, names
+    shift = max(0, codes.get("AC01", 0) - 30)
+    return syms, names, shift
 
 
 def _level_value(text):
@@ -816,7 +821,7 @@ def _keyboard_keymap(rec, _sid, _format, fd, _size):
         os.close(fd)
     except OSError:
         pass
-    _STATE["syms"], _STATE["names"] = parse_keymap(
+    _STATE["syms"], _STATE["names"], _STATE["shift"] = parse_keymap(
         data.decode("utf-8", "replace"))
 
 
@@ -839,6 +844,10 @@ def _keyboard_key(rec, _sid, serial, _time, key, state):
     _STATE["serial"] = serial
     syms = _STATE.get("syms") or {}
     names = _STATE.get("names") or {}
+    # The event's key is the raw hardware scan code; the keymap's keycodes
+    # section numbers the same physical keys a few higher, and parse_keymap
+    # returned how much higher (nothing when it is already evdev-coded).
+    key = key + _STATE.get("shift", 0)
     key_syms = syms.get(key)
     if not key_syms:
         return

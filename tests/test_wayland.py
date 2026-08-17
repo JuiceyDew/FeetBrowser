@@ -150,7 +150,7 @@ def test_symbol_value_knows_the_keysym_names():
 
 
 def test_parse_keymap_reads_codes_and_shift_levels():
-    syms, names = wayland.parse_keymap(KEYMAP)
+    syms, names, shift = wayland.parse_keymap(KEYMAP)
     eq(syms[10], [ord("1"), ord("!")], "shifted 1 is exclam")
     eq(syms[30], [ord("a"), ord("A")])
     eq(syms[50], [0xFFE1], "Shift_L")
@@ -161,9 +161,21 @@ def test_parse_keymap_reads_codes_and_shift_levels():
 
 
 def test_parse_keymap_follows_aliases():
-    syms, names = wayland.parse_keymap(KEYMAP)
+    syms, names, shift = wayland.parse_keymap(KEYMAP)
     # I149 is an alias of AC02 (the 's' key).
     eq(syms.get(31), [ord("s"), ord("S")])
+
+
+def test_parse_keymap_reports_the_scan_code_shift():
+    # The fixture is written in evdev scan codes (AC01 at 30), so no shift
+    # is needed. The keymaps a compositor actually hands over number the
+    # same physical keys 8 higher (AC01 at 38), which is what the event
+    # lookup has to add to a raw hardware scan code.
+    syms, names, shift = wayland.parse_keymap(KEYMAP)
+    eq(shift, 0, "a fixture written in scan codes shifts by nothing")
+    xkb_style = KEYMAP.replace("<AC01> = 30;", "<AC01> = 38;")
+    _, _, xkb_shift = wayland.parse_keymap(xkb_style)
+    eq(xkb_shift, 8, "a keymap numbered 8 above the scan codes shifts by 8")
 
 
 # -- fixed point -----------------------------------------------------------
@@ -438,9 +450,10 @@ def live_keyboard_path_translates_keysyms():
     this drives the whole key path the way the compositor would: install a
     parsed keymap, give the window the keyboard focus, and feed key events
     through the same handler the socket dispatch calls."""
-    syms, names = wayland.parse_keymap(KEYMAP)
+    syms, names, shift = wayland.parse_keymap(KEYMAP)
     wayland._STATE["syms"] = syms
     wayland._STATE["names"] = names
+    wayland._STATE["shift"] = shift
     win = wayland.WaylandTk(width=300, height=200, title="keys")
     try:
         assert _wait_configured(win)
@@ -449,6 +462,7 @@ def live_keyboard_path_translates_keysyms():
         # with a known map, so the fixture goes back on.
         wayland._STATE["syms"] = syms
         wayland._STATE["names"] = names
+        wayland._STATE["shift"] = shift
         wayland._KEYBOARD_WIN = win
         wayland._HELD.clear()
         wayland._CAPS[0] = False
@@ -475,9 +489,10 @@ def live_keyboard_path_translates_keysyms():
 def live_control_shortcuts_reach_the_key_binding():
     """Control-L must land on <Control-l>, which is how the address bar is
     focused -- the modifier has to survive into the binding name."""
-    syms, names = wayland.parse_keymap(KEYMAP)
+    syms, names, shift = wayland.parse_keymap(KEYMAP)
     wayland._STATE["syms"] = syms
     wayland._STATE["names"] = names
+    wayland._STATE["shift"] = shift
     win = wayland.WaylandTk(width=300, height=200, title="ctrl")
     try:
         assert _wait_configured(win)
@@ -486,6 +501,7 @@ def live_control_shortcuts_reach_the_key_binding():
         # synthetic key events run.
         wayland._STATE["syms"] = syms
         wayland._STATE["names"] = names
+        wayland._STATE["shift"] = shift
         wayland._KEYBOARD_WIN = win
         wayland._HELD.clear()
         wayland._CAPS[0] = False
