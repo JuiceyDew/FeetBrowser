@@ -58,23 +58,90 @@ WL_SEAT_CAPABILITY_KEYBOARD = 2
 # wl_pointer axis ids.
 WL_POINTER_AXIS_VERTICAL_SCROLL = 0
 
-# cursor-shape-v1: wp_cursor_shape_device_v1.shape values. The compositor
-# draws the pointer, so a client only names the shape it wants -- no cursor
-# images to ship, no libwayland-cursor.
-SHAPE_DEFAULT = 1
-SHAPE_POINTER = 2
-SHAPE_TEXT = 3
-
-# The Tk cursor names browser.py hands the canvas -> the shape above.
-CURSOR_SHAPES = {
-    "": SHAPE_DEFAULT,
-    "arrow": SHAPE_DEFAULT,
-    "hand2": SHAPE_POINTER,
-    "pointer": SHAPE_POINTER,
-    "hand": SHAPE_POINTER,
-    "text": SHAPE_TEXT,
-    "xterm": SHAPE_TEXT,
-    "ibeam": SHAPE_TEXT,
+# Cursor images, drawn into a small wl_surface and handed to
+# wl_pointer.set_cursor -- the classic, universally supported mechanism (the
+# cursor-shape-v1 protocol this used to speak turned out to be dropped by
+# this KWin, which made the window vanish the moment the pointer entered).
+# Each entry is a 24x24 bitmap: '#' is the filled shape and '.' is clear.
+_CURSOR_ARROW = [
+    "#...............................",
+    "##..............................",
+    "###.............................",
+    "####............................",
+    "#####...........................",
+    "######..........................",
+    "#######.........................",
+    "########........................",
+    "#########.......................",
+    "##########......................",
+    "###########.....................",
+    "############....................",
+    "#############...................",
+    "###############.................",
+    "################................",
+    "###############.##..............",
+    "##############.###..............",
+    "#############..###.............",
+    "############..###..............",
+    "###########..###...............",
+    "##########..###................",
+    "#########..###.................",
+    "########..###..................",
+    "#######..###...................",
+]
+_CURSOR_HAND = [
+    "####............................",
+    "##..##..........................",
+    "#....##.........................",
+    "#.....#.........................",
+    "#.....#.........................",
+    "#....##.........................",
+    "#....##.........................",
+    "#....##.........................",
+    "#....##.........................",
+    "#....##.........................",
+    "#....##.........................",
+    "#....##.........................",
+    "#....##.........................",
+    "#....##.........................",
+    "#....##.........................",
+    "#....##.........................",
+    "#....##.........................",
+    "#...##..........................",
+    "#####...........................",
+]
+_CURSOR_TEXT = [
+    "........##.........",
+    "........##.........",
+    "........##.........",
+    "........##.........",
+    "........##.........",
+    "........##.........",
+    "........##.........",
+    "........##.........",
+    "........##.........",
+    ".......####........",
+    "........##.........",
+    "........##.........",
+    "........##.........",
+    "........##.........",
+    "........##.........",
+    "........##.........",
+    "........##.........",
+    "........##.........",
+    "........##.........",
+    "........##.........",
+]
+# Tk cursor name -> (bitmap, hotspot).
+_CURSOR_IMAGES = {
+    "": (_CURSOR_ARROW, (0, 0)),
+    "arrow": (_CURSOR_ARROW, (0, 0)),
+    "hand2": (_CURSOR_HAND, (2, 0)),
+    "pointer": (_CURSOR_HAND, (2, 0)),
+    "hand": (_CURSOR_HAND, (2, 0)),
+    "text": (_CURSOR_TEXT, (8, 0)),
+    "xterm": (_CURSOR_TEXT, (8, 0)),
+    "ibeam": (_CURSOR_TEXT, (8, 0)),
 }
 
 # How many pixels one scroll "notch" moves, matching x11.py and the other
@@ -575,8 +642,8 @@ def _connect():
     conn = _Conn(sock)
     _STATE["conn"] = conn
     _STATE.update(compositor=0, shm=0, xdg_wm_base=0, seat=0,
-                  data_device_manager=0, cursor_shape_manager=0,
-                  pointer=0, pointer_shape=0, pointer_serial=0,
+                  data_device_manager=0,
+                  pointer=0, pointer_serial=0,
                   outputs=[], scale=1.0,
                   pending_scale=1.0, serial=0)
     registry = conn.new_id("wl_registry")
@@ -618,11 +685,6 @@ def _global(rec, _sid, name, interface, version):
         oid = conn.new_id("wl_data_device_manager")
         conn.request(_sid, 0, "usun", [name, "wl_data_device_manager", 3, oid])
         _STATE["data_device_manager"] = oid
-    elif interface == "wp_cursor_shape_manager_v1":
-        oid = conn.new_id("wp_cursor_shape_manager_v1")
-        conn.request(_sid, 0, "usun",
-                     [name, "wp_cursor_shape_manager_v1", 1, oid])
-        _STATE["cursor_shape_manager"] = oid
 
 
 def _global_remove(rec, _sid, _name):
@@ -722,25 +784,6 @@ def _seat_name(rec, _sid, _name):
     pass
 
 
-def _ensure_pointer_shape():
-    """The zwp_pointer_shape_v1 object for the seat's pointer, created once.
-
-    Returns its id, or 0 when the compositor has no cursor-shape manager --
-    in which case no cursor is set at all and the compositor falls back to
-    its own default, exactly as it did before this existed.
-    """
-    if _STATE.get("pointer_shape"):
-        return _STATE["pointer_shape"]
-    m = _STATE.get("cursor_shape_manager")
-    ptr = _STATE.get("pointer")
-    if not m or not ptr:
-        return 0
-    oid = _conn().new_id("zwp_pointer_shape_v1")
-    _conn().request(m, 0, "no", [oid, ptr])   # cursor_shape_manager.get_pointer
-    _STATE["pointer_shape"] = oid
-    return oid
-
-
 def _pointer_enter(rec, _sid, serial, surface, x, y):
     global _POINTER_WIN
     _STATE["serial"] = serial
@@ -750,7 +793,6 @@ def _pointer_enter(rec, _sid, serial, surface, x, y):
         win = _POINTER_WIN
         win._pointer_inside = True
         win._last_x, win._last_y = fixed_to_float(x), fixed_to_float(y)
-        _ensure_pointer_shape()
         win._apply_cursor()
 
 
@@ -1259,6 +1301,10 @@ class WaylandWindow(Window):
         self._axis_discrete_pending = None
         self._button_held = 0
         self._cursor_name = None
+        self._cursor_buffer = None
+        self._cursor_size = (0, 0)
+        self._cursor_surface = conn.new_id("wl_surface")
+        conn.request(_STATE["compositor"], 0, "n", [self._cursor_surface])
         self._last_x = 0.0
         self._last_y = 0.0
         self.set_scale(_STATE["scale"])
@@ -1415,22 +1461,108 @@ class WaylandWindow(Window):
     def _apply_cursor(self):
         """Honour the pointer the canvas asked for, when it changes.
 
-        The compositor draws the pointer, so naming the shape is a two-word
-        request on the cursor-shape object rather than an image to ship. The
-        serial is the one from the last pointer-enter, which is what lets the
-        compositor tell a stale request from a live one; with no shape object
-        (no cursor-shape manager) nothing is sent and the compositor shows
-        its default."""
+        A small wl_surface holds the cursor bitmap; on pointer enter -- and
+        whenever the browser asks for a different cursor over a link -- the
+        bitmap is drawn into it, committed, and handed to wl_pointer.set_cursor
+        with the enter serial. This is the classic mechanism every compositor
+        speaks (cursor-shape-v1 was tried and this KWin drops the resource).
+        """
         wanted = getattr(self.canvas, "cursor", "") if self.canvas else ""
         if wanted == self._cursor_name or self._closed:
             return
         self._cursor_name = wanted
-        shape = CURSOR_SHAPES.get(wanted, SHAPE_DEFAULT)
-        oid = _STATE.get("pointer_shape")
+        bitmap, (hx, hy) = _CURSOR_IMAGES.get(wanted, _CURSOR_IMAGES[""])
         ptr = _STATE.get("pointer")
         serial = _STATE.get("pointer_serial")
-        if oid and ptr and serial:
-            self._conn.request(oid, 0, "ouu", [ptr, serial, shape])
+        if not ptr or not serial:
+            return
+        if not self._cursor_surface:
+            return
+        conn = self._conn
+        if self._draw_cursor(bitmap, hx, hy) is None:
+            return
+        conn.request(ptr, 0, "uoii",
+                     [serial, self._cursor_surface, hx, hy])  # set_cursor
+
+    def _draw_cursor(self, bitmap, hx, hy):
+        """Draw `bitmap` into a cursor buffer on the cursor surface.
+
+        Returns the buffer object, or None when no shm buffer could be made
+        (no memory) -- in which case the previous cursor stays."""
+        height = len(bitmap)
+        width = max(len(row) for row in bitmap)
+        buf = self._cursor_buffer
+        if buf is None or buf.width != width or buf.height != height:
+            self._release_cursor_buffer()
+            buf = self._make_cursor_buffer(width, height)
+            if buf is None:
+                return None
+            self._cursor_buffer = buf
+            self._cursor_size = (width, height)
+        mem = buf.mem
+        stride = width * 4
+        for y in range(height):
+            row = bitmap[y]
+            for x in range(width):
+                filled = x < len(row) and row[x] == "#"
+                off = y * stride + x * 4
+                if filled:
+                    mem[off:off + 3] = b"\x00\x00\x00"   # black, BGR
+                    mem[off + 3] = 0xff
+                else:
+                    mem[off:off + 4] = b"\x00\x00\x00\x00"  # clear
+        conn = self._conn
+        conn.request(self._cursor_surface, 1, "oii",
+                     [buf.proxy, 0, 0])              # attach
+        conn.request(self._cursor_surface, 9, "iiii",
+                     [0, 0, width, height])          # damage_buffer
+        conn.request(self._cursor_surface, 6, "", [])   # commit
+        return buf.proxy
+
+    def _make_cursor_buffer(self, width, height):
+        """A wl_shm buffer for the cursor surface, XRGB8888."""
+        size = width * height * 4
+        try:
+            fd = os.memfd_create("feetbrowser-cursor", 0)
+        except (AttributeError, OSError):
+            fd = _shm_fd()
+        if fd is None:
+            return None
+        try:
+            os.ftruncate(fd, size)
+            mem = mmap.mmap(fd, size, mmap.MAP_SHARED,
+                            mmap.PROT_READ | mmap.PROT_WRITE)
+        except OSError:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            return None
+        conn = self._conn
+        pool = conn.new_id("wl_shm_pool")
+        conn.request(_STATE["shm"], 0, "nhi", [pool, fd, size])
+        buffer = conn.new_id("wl_buffer", window=self)
+        conn.request(pool, 0, "niiiiu",
+                     [buffer, 0, width, height, width * 4,
+                      WL_SHM_FORMAT_XRGB8888])
+        return _ShmBuffer(proxy=buffer, pool=pool, fd=fd, mem=mem,
+                          width=width, height=height, free=True)
+
+    def _release_cursor_buffer(self):
+        buf = self._cursor_buffer
+        if buf is None:
+            return
+        try:
+            buf.mem.close()
+        except (BufferError, ValueError):
+            pass
+        try:
+            os.close(buf.fd)
+        except OSError:
+            pass
+        self._conn.objects.pop(buf.proxy, None)
+        self._conn.objects.pop(buf.pool, None)
+        self._cursor_buffer = None
 
     def _on_xdg_configure(self, serial):
         """The configure sequence for a state change is complete.
@@ -1484,6 +1616,7 @@ class WaylandWindow(Window):
         self._closed = True
         _SURFACES.pop(self._surface, None)
         self._drop_buffers()
+        self._release_cursor_buffer()
         for oid in (self._toplevel, self._xdg_surface, self._surface):
             self._conn.objects.pop(oid, None)
         self._conn.sock.close()

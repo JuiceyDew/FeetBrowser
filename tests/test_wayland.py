@@ -236,19 +236,25 @@ def test_modifier_bits_are_tks_three():
     eq(wayland.state_from_xkb(False, False, False), 0)
 
 
-def test_cursor_names_map_to_cursor_shape_shapes():
-    # The browser names what X11 would call the hand and the I-beam; the
-    # compositor wants the cursor-shape-v1 enum values instead.
-    eq(wayland.CURSOR_SHAPES[""], wayland.SHAPE_DEFAULT)
-    eq(wayland.CURSOR_SHAPES["hand2"], wayland.SHAPE_POINTER)
-    eq(wayland.CURSOR_SHAPES["text"], wayland.SHAPE_TEXT)
-    eq(wayland.CURSOR_SHAPES.get("something-else", wayland.SHAPE_DEFAULT),
-       wayland.SHAPE_DEFAULT, "an unknown name falls back to the default")
+def test_cursor_names_have_images():
+    # The browser names what X11 would call the arrow, the hand and the
+    # I-beam; each one is a bitmap + hotspot for wl_pointer.set_cursor.
+    arrow, (hx, hy) = wayland._CURSOR_IMAGES[""]
+    hand, _ = wayland._CURSOR_IMAGES["hand2"]
+    text, _ = wayland._CURSOR_IMAGES["text"]
+    eq(len(arrow[0]), 32, "arrow is 32 wide")
+    eq(len(arrow), 24, "arrow is 24 tall")
+    eq(arrow[0][0], "#", "the arrow starts at its hotspot")
+    eq((hx, hy), (0, 0))
+    assert any(r.startswith("#") for r in hand), "the hand is drawn"
+    assert any("#" in r for r in text), "the I-beam is drawn"
+    eq(wayland._CURSOR_IMAGES.get("something-else", wayland._CURSOR_IMAGES[""])[0],
+       arrow, "an unknown name falls back to the default arrow")
 
 
-def test_cursor_shape_requests_carry_pointer_serial_and_shape():
+def test_cursor_is_set_via_wl_pointer_set_cursor():
     """_apply_cursor only sends when the shape changes, and the request is
-    the two-word set_shape the compositor expects: pointer, serial, shape."""
+    wl_pointer.set_cursor (opcode 4): serial, cursor surface, hotspot."""
     sent = []
     conn = type("C", (), {"request": lambda self, oid, op, fmt, v: sent.append(
         (oid, op, fmt, v))})()
@@ -259,13 +265,17 @@ def test_cursor_shape_requests_carry_pointer_serial_and_shape():
             self.canvas = type("CV", (), {"cursor": "hand2"})()
             self._closed = False
             self._cursor_name = None
+            self._cursor_buffer = type("B", (), {"proxy": 77})()
+            self._cursor_size = (0, 0)
+            self._cursor_surface = 55
 
-    wayland._STATE.update(pointer=11, pointer_serial=99,
-                          pointer_shape=22)
+    wayland._STATE.update(pointer=11, pointer_serial=99)
     win = Win()
+    # _draw_cursor is stubbed so the test sees only the set_cursor request.
+    win._draw_cursor = lambda bitmap, hx, hy: 77
     win._apply_cursor()
-    eq(sent, [(22, 0, "ouu", [11, 99, wayland.SHAPE_POINTER])],
-       "the set_shape request names the pointer, serial and shape")
+    eq(sent, [(11, 0, "uoii", [99, 55, 2, 0])],
+       "set_cursor names the serial, the cursor surface and the hotspot")
     # Unchanged shape: nothing sent.
     sent.clear()
     win._apply_cursor()
