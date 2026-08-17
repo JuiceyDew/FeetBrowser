@@ -444,6 +444,11 @@ def live_keyboard_path_translates_keysyms():
     win = wayland.WaylandTk(width=300, height=200, title="keys")
     try:
         assert _wait_configured(win)
+        # Waiting pumped the compositor, which hands over its own keymap on
+        # keyboard focus -- in its own layout. This test drives the key path
+        # with a known map, so the fixture goes back on.
+        wayland._STATE["syms"] = syms
+        wayland._STATE["names"] = names
         wayland._KEYBOARD_WIN = win
         wayland._HELD.clear()
         wayland._CAPS[0] = False
@@ -476,6 +481,11 @@ def live_control_shortcuts_reach_the_key_binding():
     win = wayland.WaylandTk(width=300, height=200, title="ctrl")
     try:
         assert _wait_configured(win)
+        # Same as the keysym test: the compositor's keymap (in its layout)
+        # arrives while we wait, so the fixture is put back before the
+        # synthetic key events run.
+        wayland._STATE["syms"] = syms
+        wayland._STATE["names"] = names
         wayland._KEYBOARD_WIN = win
         wayland._HELD.clear()
         wayland._CAPS[0] = False

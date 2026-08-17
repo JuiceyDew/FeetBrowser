@@ -211,7 +211,7 @@ def pack_message(obj, opcode, fmt, values, fds=()):
 def unpack_message(fmt, words, fds):
     """Arguments of one event, from its signature and the raw words."""
     args = []
-    wi = fi = 0
+    wi = 0
     for ch in fmt:
         if ch == "u":
             args.append(words[wi]); wi += 1
@@ -234,7 +234,7 @@ def unpack_message(fmt, words, fds):
             wi += nw
             args.append(raw[:length])
         elif ch == "h":
-            args.append(fds[fi]); fi += 1
+            args.append(fds.pop(0))
     return args
 
 
@@ -317,8 +317,14 @@ def symbol_value(name):
 
     A single character is its own codepoint; the ASCII punctuation keys are
     named after their character; everything else is the small table of
-    keysyms a keyboard layout actually uses.
+    keysyms a keyboard layout actually uses. A compact keymap may hand us
+    the value itself (``0x61``), which is read straight off.
     """
+    if name.startswith("0x") or name.startswith("0X"):
+        try:
+            return int(name, 16)
+        except ValueError:
+            return 0
     if len(name) == 1:
         return ord(name)
     if name in NAMED_KEYSYMS:
@@ -326,6 +332,25 @@ def symbol_value(name):
     if name in ASCII_NAMES:
         return ord(ASCII_NAMES[name])
     return 0
+
+
+def keysym_name(value):
+    """The X11 name for a keysym value, the reverse of symbol_value.
+
+    A compact keymap hands over only the values (``key <AC01> {
+    [ 0x61, 0x41 ] };``); the key path keys off names, so the value has
+    to become one. Single characters are their codepoint again, the named
+    keysyms come out of the same tables symbol_value reads.
+    """
+    if 0x20 <= value < 0x7f:
+        return chr(value)
+    for key, val in NAMED_KEYSYMS.items():
+        if val == value:
+            return key
+    for key, ch in ASCII_NAMES.items():
+        if ord(ch) == value:
+            return key
+    return "0x%x" % value
 
 
 def _section(text, name):
@@ -374,6 +399,10 @@ def parse_keymap(text):
             inner = m.group(2)
             sm = re.search(r"symbols\[Group1\]\s*=\s*\[\s*([^\]]*)\]", inner)
             if not sm:
+                # The compact form a compositor may send: a key block of
+                # just its symbols, ``key <AC01> { [ 0x61, 0x41 ] };``.
+                sm = re.search(r"\[\s*([^\]]*)\]", inner)
+            if not sm:
                 continue
             level_names = [x.strip() for x in sm.group(1).split(",")
                            if x.strip()]
@@ -382,9 +411,20 @@ def parse_keymap(text):
                 code = codes.get(aliases.get(name))
             if code is None or not level_names:
                 continue
-            syms[code] = [symbol_value(x) for x in level_names[:2]]
-            names[code] = level_names[:2]
+            levels = [_level_value(x) for x in level_names[:2]]
+            syms[code] = [value for value, _name in levels]
+            names[code] = [nm for _value, nm in levels]
     return syms, names
+
+
+def _level_value(text):
+    """(keysym, name) for one key level, from either spelling a keymap uses:
+    a name like ``a`` or ``Shift_L``, or a compact keymap's raw value like
+    ``0x61``."""
+    if text.startswith("0x"):
+        value = int(text, 16)
+        return value, keysym_name(value)
+    return symbol_value(text), text
 
 
 # -- the connection ---------------------------------------------------------
@@ -758,6 +798,10 @@ def _keyboard_keymap(rec, _sid, _format, fd, _size):
     xkbcommon.
     """
     data = b""
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+    except OSError:
+        pass
     while True:
         try:
             chunk = os.read(fd, 65536)
@@ -1077,7 +1121,7 @@ _EVENTS = {
         10: ("uu", _pointer_axis_relative_direction),
     },
     "wl_keyboard": {
-        0: ("ufu", _keyboard_keymap),
+        0: ("uhu", _keyboard_keymap),
         1: ("uoa", _keyboard_enter),
         2: ("uo", _keyboard_leave),
         3: ("uuuu", _keyboard_key),
