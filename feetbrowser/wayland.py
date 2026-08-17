@@ -48,8 +48,10 @@ from .x11 import keysym_event, key_release_sequences
 
 # -- constants -------------------------------------------------------------
 
-# wl_shm_format, the one we use: 4 bytes per pixel, B G R X, alpha opaque.
+# wl_shm_format: the enum gives xrgb8888 the value 1 (and argb8888, the
+# cursor's format, the value 0); 4 bytes per pixel, B G R X/A.
 WL_SHM_FORMAT_XRGB8888 = 1
+WL_SHM_FORMAT_ARGB8888 = 0
 
 # wl_seat capabilities.
 WL_SEAT_CAPABILITY_POINTER = 1
@@ -1544,7 +1546,7 @@ class WaylandWindow(Window):
         buffer = conn.new_id("wl_buffer", window=self)
         conn.request(pool, 0, "niiiiu",
                      [buffer, 0, width, height, width * 4,
-                      WL_SHM_FORMAT_XRGB8888])
+                      WL_SHM_FORMAT_ARGB8888])
         return _ShmBuffer(proxy=buffer, pool=pool, fd=fd, mem=mem,
                           width=width, height=height, free=True)
 
