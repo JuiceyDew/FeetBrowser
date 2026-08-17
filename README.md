@@ -57,11 +57,14 @@ with (`pip install feetbrowser_engine-*.whl`), and `run.sh` finds the
 engine already importable and skips the build.
 
 The window itself is ours too. macOS gets one through AppKit, Linux one
-through Xlib, and Windows one through user32/gdi32, all by ctypes, so there
-is nothing to install for any of them, and X11 covers Wayland desktops
-through XWayland. Anywhere else, and anywhere with no display, the browser
-still renders: `--screenshot` writes the page to a PNG without opening
-anything.
+through Wayland or X11, and Windows one through user32/gdi32, all by ctypes,
+so there is nothing to install for any of them. On Linux, a native Wayland
+window is used when the session offers one -- it needs no library at all,
+because the Wayland protocol is spoken directly over a unix socket the way
+the browser already speaks HTTP -- and X11, including XWayland, is the
+fallback, so X-only users are unaffected. Anywhere else, and
+anywhere with no display, the browser still renders: `--screenshot` writes
+the page to a PNG without opening anything.
 
 To render a page to a PNG without opening a window:
 

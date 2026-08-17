@@ -68,14 +68,15 @@ jobs:
 
       # test_cocoa opens real NSWindows on the macOS runners and test_win32
       # opens real HWNDs on the Windows ones; each skips off its own
-      # platform, and test_x11 runs its whole offline half everywhere. Until
-      # this matrix grew a Windows entry, the 31 tests in test_win32.py had
-      # never been executed by anything.
+      # platform, and test_x11 and test_wayland run their whole offline half
+      # everywhere. Until this matrix grew a Windows entry, the 31 tests in
+      # test_win32.py had never been executed by anything.
       - name: Platform window tests
         run: |
           $PY tests/test_cocoa.py
           $PY tests/test_x11.py
           $PY tests/test_win32.py
+          $PY tests/test_wayland.py
 
       # The browser's half of the audio seam: a <video> element that has a
       # soundtrack, and the pictures that have to follow it. The audio stack
@@ -210,6 +211,41 @@ jobs:
           name: x11-window
           path: artifacts/x11-window.png
           if-no-files-found: error
+
+  # The Wayland sibling of the job above. X11 can be faked with Xvfb, but
+  # Wayland has no equivalent, so the compositor is weston's headless
+  # backend: a real registry, a real xdg toplevel, real shared-memory
+  # buffers, and the suite reads the pixels it wrote back out of its own
+  # mmap. This job is why the live half of test_wayland.py exists at all --
+  # it is the only runner that ever starts it.
+  wayland:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build
+        with:
+          python-version: '3.12'
+
+      # The client under test speaks Wayland over a bare socket, but the
+      # *compositor* it talks to is weston, and weston links these itself.
+      - name: Install weston (the compositor under test)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y weston libwayland-client0 \
+            libwayland-cursor0 libxkbcommon0
+
+      - name: Wayland tests against a headless compositor
+        run: |
+          RUNTIME="$(mktemp -d)"
+          chmod 0700 "$RUNTIME"
+          XDG_RUNTIME_DIR="$RUNTIME" weston --backend=headless-backend.so \
+            --socket=feetbrowser-ci --renderer=pixman \
+            >"$RUNTIME/weston.log" 2>&1 &
+          WESTON_PID=$!
+          sleep 1
+          XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY=feetbrowser-ci \
+            $PY tests/test_wayland.py
+          kill $WESTON_PID || true
 
   # Warnings are kept at zero deliberately. Denying them here is the only
   # thing that keeps it true; 84 of them accumulated the other way. Its own

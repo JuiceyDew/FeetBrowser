@@ -97,6 +97,9 @@ rem one that skips everywhere else.
 %RUN% tests\test_cocoa.py || exit /b 1
 %RUN% tests\test_x11.py || exit /b 1
 %RUN% tests\test_win32.py || exit /b 1
+rem test_wayland.py has no wayland here; its offline half runs and the live
+rem half says so.
+%RUN% tests\test_wayland.py || exit /b 1
 rem A <video> element's soundtrack, and the pictures that follow it. The
 rem audio stack itself is feetplayer's now, and is tested there.
 %RUN% tests\test_audio.py || exit /b 1

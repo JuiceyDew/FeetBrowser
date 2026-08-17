@@ -10,7 +10,8 @@ What genuinely varies is where the pixels are put, and ``FEETBROWSER_DISPLAY``
 is what selects it:
 
     cocoa     the AppKit window, via ctypes (macOS)
-    x11       the Xlib window, via ctypes
+    wayland   the Wayland window, via ctypes (Linux)
+    x11       the Xlib window, via ctypes (Linux, incl. under XWayland)
     none      stay headless even where a window is possible
 
 Empty -- the default -- means "use whatever this platform offers". Naming a
@@ -34,10 +35,15 @@ DISPLAY = os.environ.get("FEETBROWSER_DISPLAY", "").strip().lower()
 # answers `available()` for itself, so a backend that cannot run here simply
 # says so and the next is tried. Cocoa comes first because on the one system
 # that has both, XQuartz is the deliberate choice and Cocoa is the default.
-# Win32 sits between them only because no system offers it alongside either.
+# On Linux, Wayland comes before X11 so a session that offers both prefers
+# the native compositor -- and X11 is still tried second, which is what keeps
+# every X-only and XWayland user, and every machine with no Wayland library
+# at all, exactly where they were. Win32 sits between the rest only because
+# no system offers it alongside either.
 NATIVE_BACKENDS = (
     ("cocoa", "Cocoa", ("cocoa", "macos", "darwin"), "CocoaTk"),
     ("win32", "Win32", ("win32", "windows"), "Win32Tk"),
+    ("wayland", "Wayland", ("wayland", "wlroots", "sway"), "WaylandTk"),
     ("x11", "X11", ("x11", "linux", "xorg"), "X11Tk"),
 )
 

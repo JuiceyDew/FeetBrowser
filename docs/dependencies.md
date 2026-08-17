@@ -107,7 +107,8 @@ Local time is the part that does not fall out for free. Three options: stay on
 UTC, which is honest and is very close to what the code already pretends,
 since `interp.rs:2058` and `2160` print the literal string `GMT+0000` while
 formatting local fields; call libc `localtime_r` over FFI, which is the same
-move `cocoa.py` and `x11.py` already make for their libraries; or parse TZif,
+move `cocoa.py`, `wayland.py` and `x11.py` already make for their libraries;
+or parse TZif,
 which is not worth it. Start with UTC.
 
 Two bugs are worth fixing in the same change, because both are live today and

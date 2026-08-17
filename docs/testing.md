@@ -27,6 +27,8 @@ tests/
   test_cocoa.py     the macOS window, driven by real NSEvents (macOS only)
   test_x11.py       the X11 window, driven by real X events (needs a server)
   x11_shot.py       photographs a real X11 window with XGetImage (CI artifact)
+  test_wayland.py   the Wayland window, driven by real compositor events
+                    (needs a compositor; CI runs weston headless)
   test_win32.py     the Windows window, driven by real messages (Windows only)
   test_units.py     offline unit tests (URL, HTML, CSS, layout, internal pages)
   test_js.py        offline tests for the JS engine + DOM bridge
@@ -163,6 +165,17 @@ colours arrived in the right order. CI runs that half on Linux under
 can see what the Linux build actually drew, after checking that the three
 colour swatches on that page came back present and in order, which is what a
 wrong channel mask or byte order permutes.
+
+`test_wayland.py` splits the same way, and the shape of the halves follows
+from the protocol. The pure half (XRGB8888 packing, fixed-point conversion,
+button numbering, keysym and scroll-step translation) runs everywhere. The
+live half needs a compositor, and since a compositor owns the pixels after we
+hand them over, it reads them back out of the shared-memory buffer the client
+itself mmaps -- the same honesty as XGetImage, from the only place that can
+answer. Input is the one thing the live half cannot exercise: weston's
+headless backend has no seat, so no pointer and no keyboard exist to send
+events from. That path is covered by the pure translation tests and by
+reading, and is the first thing to verify on a real desktop.
 
 `test_win32.py` splits the same way, and for the same reason. Its offline
 half (DIB stride rounding, the BGRX byte order, virtual-key to keysym
