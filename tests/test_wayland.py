@@ -258,6 +258,7 @@ def test_xcursor_parser_reads_a_theme_image():
     # a 2x2 image with an opaque black pixel at the hotspot and clear
     # elsewhere.
     import struct as _struct
+    import tempfile as _tempfile
     def pixel(argb):  # ARGB uint32 little-endian -> B,G,R,A bytes
         return _struct.pack("<I", argb)
     image = (pixel(0xFF000000) + pixel(0x00000000)
@@ -268,8 +269,10 @@ def test_xcursor_parser_reads_a_theme_image():
     toc = _struct.pack("<III", 0xFFFD0002, 12, 28)
     header = _struct.pack("<III", 16, 0x100, 1)
     blob = b"Xcur" + header + toc + chunk
-    open("/tmp/opencode/test-cursor.xcursor", "wb").write(blob)
-    got = wayland._parse_xcursor("/tmp/opencode/test-cursor.xcursor", 24)
+    path = os.path.join(_tempfile.mkdtemp(), "cursor.xcursor")
+    with open(path, "wb") as f:
+        f.write(blob)
+    got = wayland._parse_xcursor(path, 24)
     eq(got, (2, 2, image, 0, 0), "the image and hotspot parse out")
 
 
