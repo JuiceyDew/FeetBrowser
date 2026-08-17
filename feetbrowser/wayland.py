@@ -828,6 +828,8 @@ def _pointer_button(rec, _sid, serial, _time, button, state):
     if win is None:
         return
     _STATE["serial"] = serial
+    if state:
+        _STATE["button_serial"] = serial
     pressed = bool(state)
     binding = button_event(button, pressed)
     if binding is None:
@@ -1493,6 +1495,22 @@ class WaylandWindow(Window):
             return
         conn.request(ptr, 0, "uoii",
                      [serial, self._cursor_surface, hx, hy])  # set_cursor
+
+    def drag_start(self):
+        """Move the window under the pointer, as if its title bar were being
+        dragged.
+
+        xdg_toplevel.move hands the compositor the seat and the serial of
+        the button press that began the gesture, and the compositor moves
+        the window after the pointer. The browser calls this when a press
+        lands on its own top bar but on no control there."""
+        win = _POINTER_WIN if _POINTER_WIN is not None else self
+        if win._closed:
+            return
+        seat = _STATE.get("seat")
+        serial = _STATE.get("button_serial")
+        if seat and serial:
+            win._conn.request(win._toplevel, 5, "ou", [seat, serial])
 
     def _draw_cursor(self, width, height, argb):
         """Copy an ARGB image (B G R A bytes) into a cursor buffer.

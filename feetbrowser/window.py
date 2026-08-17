@@ -385,6 +385,12 @@ class Window:
 
     # -- hooks for platform subclasses ------------------------------------
 
+    def drag_start(self):
+        """Start a window move, as if the title bar were being dragged.
+
+        Only the native backends that can move a window implement this; the
+        headless root and others leave it a no-op."""
+
     def poll_events(self):
         """Deliver pending platform input. True if anything was delivered."""
         return False

@@ -4454,7 +4454,8 @@ class _TabBrowser(Browser):
         self.context_menu = type("Menu", (), {"open_": False})()
         self.downloads_panel = type(
             "Panel", (), {"point_in": lambda s, x, y: False})()
-        self.window = type("Win", (), {"destroy": lambda s: None})()
+        self.window = type("Win", (), {"destroy": lambda s: None,
+                                    "drag_start": lambda s: None})()
         self._scroll_grab = None
         self._scroll_repaint_pending = False
         self._scroll_ticks = []
