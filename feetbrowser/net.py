@@ -539,6 +539,26 @@ class URL:
         ctype = r.headers.get("content-type", "text/html").split(";")[0].strip()
         return dict(r.headers), r.text, ctype
 
+    def request_impersonated_bytes(self, redirects_left=MAX_REDIRECTS):
+        """The impersonated fetch, with the body as bytes for images.
+
+        Pages already ride the impersonated path; images used to go over the
+        raw socket stack instead, and sites whose bot management fingerprints
+        every connection (safebooru behind Cloudflare) throttle that client
+        into hanging bursts, so a page full of thumbnails drew placeholders.
+        Presenting the same Chrome fingerprint the page fetch did keeps the
+        ``<img>`` requests on the same side of the gate.
+        """
+        try:
+            from curl_cffi import requests as cffi
+        except ImportError:
+            return self.request_bytes(redirects_left)
+        headers = dict(DEFAULT_HEADERS)
+        r = cffi.get(str(self), impersonate="chrome", headers=headers,
+                     timeout=30, allow_redirects=True)
+        ctype = r.headers.get("content-type", "text/html").split(";")[0].strip()
+        return dict(r.headers), r.content, ctype
+
     def _request_file(self, raw=False):
         local = self.local_path()
         try:

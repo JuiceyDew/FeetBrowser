@@ -24,17 +24,21 @@ interpreter, `python3 -m feetbrowser <url>` works directly.
 There is nothing else to install. The renderer is ours (see [the rendering
 engine](rendering.md)), so no GUI toolkit is needed: only Python 3, a Rust
 toolchain for that one extension, and at least one system font. The window is
-ours as well: AppKit on macOS, Xlib on Linux and on Wayland desktops through
-XWayland, and user32/gdi32 on Windows, all reached by ctypes with no bindings
-package in between.
+ours as well: AppKit on macOS, Wayland or X11 on Linux, and user32/gdi32 on
+Windows, all reached by ctypes with no bindings package in between. On a
+Wayland desktop the native Wayland window is preferred and X11 (including
+XWayland) is the fallback, so every existing X11 user is unaffected. The
+Wayland window needs no library at all: the protocol is a wire format the
+browser speaks over a plain unix socket, exactly the way `net.py` speaks
+HTTP/1.1.
 
 `FEETBROWSER_DISPLAY` decides which one, and normally wants leaving alone; it
 and the rest of the environment are described under [environment
 variables](#environment-variables) below.
 
-With no display at all (no `$DISPLAY`, no server answering, or a platform
-with no backend), the browser says which of those it was and carries on
-headless, where `--screenshot` still works.
+With no display at all (no `$DISPLAY`, no `$WAYLAND_DISPLAY`, no compositor
+answering, or a platform with no backend), the browser says which of those it
+was and carries on headless, where `--screenshot` still works.
 
 On Windows, "a Rust toolchain" is two installs rather than one, and the
 second is the one that catches people out. rustup selects the MSVC toolchain
@@ -141,9 +145,10 @@ either way, and the same again when there is no window at all.
 
 | value | effect |
 | --- | --- |
-| unset or empty | try Cocoa, then Win32, then X11, and take the first that works (the default) |
+| unset or empty | try Cocoa, then Win32, then Wayland, then X11, and take the first that works (the default) |
 | `cocoa`, `macos`, `darwin` | demand the macOS window; fail loudly if there is none |
 | `win32`, `windows` | demand the Windows window; fail loudly if there is none |
+| `wayland`, `wlroots`, `sway` | demand the native Wayland window; fail loudly if there is none |
 | `x11`, `linux`, `xorg` | demand the X11 window; fail loudly if there is none |
 | `none` | stay headless even where a window is possible |
 
@@ -151,7 +156,11 @@ The order of the first row costs nothing to get right and would be confusing
 to get wrong: no machine offers Win32 alongside either of the others, so its
 position only matters on paper. Cocoa is ahead of X11 for a real reason,
 which is that macOS with XQuartz installed has both and the Mac window is the
-one you meant.
+one you meant. On Linux, Wayland comes before X11 so a session that offers
+both -- which is every Wayland desktop, because of XWayland -- gets the native
+compositor, and X11 is still there second for the X-only and XWayland-only
+machines. (The ``linux`` spelling still means X11: it is the fallback, not a
+synonym for "Wayland".)
 
 Naming a backend that cannot run here is an error rather than a quiet
 fallback, and it is reported as a sentence rather than a traceback. Silently
@@ -160,7 +169,7 @@ no idea why.
 
 An unrecognised value is the exception to that, and not a helpful one: it
 matches no backend, so every backend is skipped and the browser runs headless
-without complaining. `FEETBROWSER_DISPLAY=wayland` therefore opens no window
+without complaining. `FEETBROWSER_DISPLAY=mir` therefore opens no window
 and says nothing about it.
 
 ### `FEETBROWSER_DOWNLOAD_DIR`

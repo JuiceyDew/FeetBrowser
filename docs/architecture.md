@@ -48,13 +48,15 @@ WebKit, Gecko, or any HTTP library; it implements its own:
   same Rust extension as the JS engine; the scene graph, the event loop and
   font *discovery* stay in Python. See [docs/rendering.md](rendering.md).
 - **Platform windows**: a real window on macOS (`cocoa.py`, ctypes into
-  AppKit), on Linux and the BSDs (`x11.py`, ctypes into Xlib, which also
-  covers Wayland desktops through XWayland) and on Windows (`win32.py`,
-  ctypes into `user32`/`gdi32`/`kernel32`), each translating native events
-  into the same Tk-shaped bindings and pushing the same framebuffer to the
-  screen. None of them needs a bindings package. Anywhere else, and anywhere
-  with no display, the browser runs headless, which is also how
-  `--screenshot` and the whole test suite run on every platform.
+  AppKit), on Linux and the BSDs (`wayland.py` for a native Wayland window,
+  the wire protocol over a plain unix socket; `x11.py` for X11, ctypes into
+  Xlib, which
+  also covers XWayland when no Wayland compositor answers) and on Windows
+  (`win32.py`, ctypes into `user32`/`gdi32`/`kernel32`), each translating
+  native events into the same Tk-shaped bindings and pushing the same
+  framebuffer to the screen. None of them needs a bindings package. Anywhere
+  else, and anywhere with no display, the browser runs headless, which is
+  also how `--screenshot` and the whole test suite run on every platform.
 - **Browser UI**: a hand-drawn chrome on that canvas: tabs, an address bar
   with search fallback, back / forward / reload / home buttons, a settings
   menu off the hamburger button (the `about:` pages and the toe hub),
@@ -117,7 +119,9 @@ feetbrowser/
   canvas.py      retained scene graph, fonts, colors, images
   window.py      windows, event bindings, after() timers, main loop
   cocoa.py       the macOS window: AppKit through ctypes, no PyObjC
-  x11.py         the Linux window: Xlib through ctypes, no python-xlib
+  wayland.py     the Linux Wayland window: the wire protocol over a plain
+                 unix socket, no library at all
+  x11.py         the Linux X11 window: Xlib through ctypes, no python-xlib
   win32.py       the Windows window: user32/gdi32 through ctypes, no pywin32
   gui.py         which native window to open, or none at all
   browser.py     window, chrome, tabs, history, event loop, layered repaint
@@ -157,6 +161,8 @@ tests/
   test_cocoa.py  the macOS window, driven by real NSEvents (macOS only)
   test_x11.py    the X11 window, driven by real X events (skips with no server)
   x11_shot.py    photographs a real X11 window with XGetImage (CI artifact)
+  test_wayland.py the Wayland window, driven by real compositor events
+                 (skips with no compositor; CI runs weston headless)
   test_win32.py  the Windows window, driven by real messages (Windows only)
   test_units.py  offline unit tests (URL, HTML, CSS, layout, internal pages)
   test_js.py     offline tests for the JS engine + DOM bridge

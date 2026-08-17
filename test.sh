@@ -8,9 +8,14 @@
 #
 # Four suites step outside all that: test_cocoa.py, test_x11.py and
 # test_win32.py open real windows wherever their platform has one and skip
-# everywhere else, and test_nav.py and smoke.py reach the network. The last
-# of those is why CI runs both of them against the offline mirror in
-# tests/fixtures instead -- see tests/fixture_server.py.
+# everywhere else, and test_nav.py and smoke.py reach the network. test_x11.py
+# and test_wayland.py are the two that run against a *headless* server on this
+# machine, and neither needs a display to do it -- the suite checks its own
+# "is there a server/compositor" question. test_wayland.py needs a compositor,
+# so the section below starts weston's headless backend when there is one
+# installed and otherwise runs just the offline half. The last of those is
+# why CI runs both of them against the offline mirror in tests/fixtures
+# instead -- see tests/fixture_server.py.
 #
 # On Windows, run test.cmd instead; it runs the same suites in the same order.
 set -euo pipefail
@@ -95,6 +100,25 @@ $run tests/test_render.py
 $run tests/test_cocoa.py   # opens real windows on macOS, skips elsewhere
 $run tests/test_x11.py     # opens real windows under X11, skips elsewhere
 $run tests/test_win32.py   # opens real windows on Windows, skips elsewhere
+# Wayland has no Xvfb: the live half of test_wayland.py needs a compositor,
+# and the only one we can start on a machine with no display is weston's
+# headless backend. Start it when it exists, point the suite at it, tear it
+# down; where there is no weston the suite's offline half still runs.
+WL_RUNTIME="$(mktemp -d)"
+chmod 0700 "$WL_RUNTIME"
+if command -v weston >/dev/null 2>&1; then
+  XDG_RUNTIME_DIR="$WL_RUNTIME" weston --backend=headless-backend.so \
+    --socket=feetbrowser-tests --renderer=pixman >"$WL_RUNTIME/weston.log" 2>&1 &
+  WL_PID=$!
+  sleep 1
+  XDG_RUNTIME_DIR="$WL_RUNTIME" WAYLAND_DISPLAY=feetbrowser-tests \
+    $run tests/test_wayland.py
+  kill "$WL_PID" 2>/dev/null || true
+  wait "$WL_PID" 2>/dev/null || true
+else
+  $run tests/test_wayland.py   # offline half only
+fi
+rm -rf "$WL_RUNTIME"
 $run tests/test_audio.py   # a <video> element's soundtrack, and the pictures that follow it
 $run tests/test_units.py
 $run tests/test_release_version.py  # the guard release.yml runs first

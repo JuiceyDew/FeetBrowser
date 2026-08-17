@@ -3090,11 +3090,13 @@ def test_the_display_variable_picks_a_backend_by_name():
         elif sys.platform == "win32":
             eq(root.__name__, "Win32Tk")
         elif root is not None:
-            # x11.py answers here too, and whether it can is a property of
-            # the machine rather than of the platform: a desktop with a
-            # server running gets X11Tk and headless CI gets None. Both are
-            # right, so the only wrong answer is some *other* backend.
-            eq(root.__name__, "X11Tk")
+            # wayland.py and x11.py both answer here, and which one can is a
+            # property of the machine rather than of the platform: a desktop
+            # with a compositor or server running gets WaylandTk or X11Tk
+            # (Wayland is tried first) and headless CI gets None. All of
+            # those are right, so the only wrong answer is some *other*
+            # backend.
+            assert root.__name__ in ("WaylandTk", "X11Tk"), root.__name__
 
         for name in ("win32", "windows"):
             gui.DISPLAY = name
@@ -4452,7 +4454,8 @@ class _TabBrowser(Browser):
         self.context_menu = type("Menu", (), {"open_": False})()
         self.downloads_panel = type(
             "Panel", (), {"point_in": lambda s, x, y: False})()
-        self.window = type("Win", (), {"destroy": lambda s: None})()
+        self.window = type("Win", (), {"destroy": lambda s: None,
+                                    "drag_start": lambda s: None})()
         self._scroll_grab = None
         self._scroll_repaint_pending = False
         self._scroll_ticks = []

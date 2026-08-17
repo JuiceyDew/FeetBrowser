@@ -12,12 +12,32 @@ with **Shoes** color themes (`about:shoes`, or `Ctrl+Shift+S`), and download
 files to disk with a manager that shows progress and can cancel (`Ctrl-J`).
 
 **Runs on:** macOS, Linux and Windows, with a real window of its own on each
-(`cocoa.py`, `x11.py` and `win32.py`, all ctypes and no toolkit), and
-anywhere at all headless: `--screenshot` and the whole test suite need no
-display. X11 covers Wayland desktops through XWayland; a native Wayland
-backend is not written. On a platform with none of the three,
-`gui.platform_root()` finds nothing and you get the headless root, so the
-browser runs but does not open.
+(`cocoa.py`, `wayland.py`, `x11.py` and `win32.py`, all ctypes and no
+toolkit), and anywhere at all headless: `--screenshot` and the whole test
+suite need no display. On Linux a native Wayland window (`wayland.py`) is
+used when the session offers one, and X11 (`x11.py`) -- including XWayland --
+is the fallback, so X-only machines are exactly where they were. On a
+platform with none of the backends, `gui.platform_root()` finds nothing and
+you get the headless root, so the browser runs but does not open.
+
+**What the Wayland backend does not do, honestly.** It draws, resizes, takes
+input and sets the title, which is the whole of what the browser asks of a
+window, but three corners are thinner than on X11. First, input is only as
+good as the compositor's seat: a Wayland client is handed a keymap by the
+compositor and has to translate it itself, so this browser parses the
+keymap's text and covers the standard layouts' level 1 and 2 (Shift, plus
+Caps Lock) -- compose sequences, AltGr level-3 symbols and dead-key
+composition are out of scope, and on a compositor with no seat the keyboard
+is simply absent. There are no client cursors either: the pointer falls back
+to the compositor's default, so the hand/arrow/text pointers the X11 backend
+can show do not change over links here. Second, the clipboard is an asynchronous, MIME-typed data
+transfer rather than a synchronous property read: copying works through the
+data device, and pasting is best-effort with a timeout, not a round trip.
+Third, there is no equivalent of `XGetImage`, so the live test half reads
+the pixels back out of the shared-memory buffer the client itself mapped
+rather than asking the compositor to photograph its own output. None of
+these is a regression against X11 for the browser's own behaviour; they are
+the places where the protocol is genuinely different.
 
 **Needs building:** the JavaScript engine is a Rust extension
 (`feetbrowser_engine`), and there is no Python fallback, so a Rust toolchain

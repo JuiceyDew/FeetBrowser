@@ -1397,7 +1397,7 @@ class Tab:
             # results are available immediately and deterministically.
             for key, url in new:
                 try:
-                    _headers, data, ctype = url.request_bytes()
+                    data, ctype = self._image_bytes(url)
                 except Exception:  # noqa: BLE001 - keep placeholder on failure
                     data, ctype = None, None
                 self._decode_and_finish(key, data, ctype)
@@ -1449,7 +1449,7 @@ class Tab:
         if not self._gui_mode():
             for key, _url in queued:
                 try:
-                    _headers, data, ctype = _url.request_bytes()
+                    data, ctype = self._image_bytes(_url)
                 except Exception:  # noqa: BLE001 - keep placeholder on failure
                     data, ctype = None, None
                 self._decode_and_finish(key, data, ctype)
@@ -1489,13 +1489,30 @@ class Tab:
         """
         return bool(self._image_queue)
 
+    def _image_bytes(self, url):
+        """Image bytes, Chrome-impersonated when curl_cffi is available.
+
+        The page fetch already impersonates a Chrome client; images used to
+        go over the raw socket stack instead, and a site whose bot management
+        fingerprints every connection throttles that client's request bursts
+        into hanging (safebooru behind Cloudflare draws placeholders for a
+        page full of thumbnails). Presenting the same fingerprint the page
+        did keeps the ``<img>`` fetches on the served side of the gate, and
+        the raw stack remains the fallback where there is no curl_cffi.
+        """
+        try:
+            _headers, data, ctype = url.request_impersonated_bytes()
+        except Exception:  # noqa: BLE001 - fall through to the raw stack
+            _headers, data, ctype = url.request_bytes()
+        return data, ctype
+
     def _fetch_image(self, key, url):
         """Background thread: fetch bytes, hand them back to the UI thread via
         the results queue. Never touches the canvas directly. The semaphore bounds
         how many image fetches run at once browser-wide."""
         try:
             with _image_fetch_sem:
-                _headers, data, ctype = url.request_bytes()
+                data, ctype = self._image_bytes(url)
         except Exception as e:  # noqa: BLE001 - failed image fetch: keep placeholder
             data, ctype = None, None
             self._image_failures.append(f"{url} ({type(e).__name__})")
@@ -3739,7 +3756,10 @@ class Browser:
         # the user may never have seen it reach.
         self._cancel_tab_drag()
         if e.y < self.chrome_height():
-            self._chrome_click(e.x, e.y, was_address)
+            if not self._chrome_click(e.x, e.y, was_address):
+                # A press on chrome that is not any control drags the window,
+                # as a native title bar would.
+                self.window.drag_start()
             return
         if not self.active_tab:
             return
@@ -3940,13 +3960,17 @@ class Browser:
             self._repaint_selection()
 
     def _chrome_click(self, x, y, was_address=False):
+        """Handle a press in the chrome. True when it landed on a control,
+        False when it was empty chrome -- which the caller turns into a
+        window drag."""
         # Toe chrome bands (above the tabs).
         bands = self.chrome_bands()
         band_h = toes.band_height(bands)
         if band_h and y < band_h:
             if toes.dispatch(self.toe_contexts, "on_chrome_click",
                              x, y, bands):
-                return
+                return True
+            return False
         # Tab bar (top 40px).
         if y < band_h + 40:
             for i, tab in enumerate(self.tabs):
@@ -3956,7 +3980,7 @@ class Browser:
                     if x >= x0 + TAB_WIDTH - TAB_CLOSE_W:
                         self.active_tab = tab
                         self.close_tab()
-                        return
+                        return True
                     # A press on the body of a tab switches to it at once, the
                     # way every browser does, and arms a drag at the same
                     # time: which of the two the gesture is only becomes clear
@@ -3965,25 +3989,26 @@ class Browser:
                     self.active_tab = tab
                     self._tab_drag = _TabDrag(i, x, x - x0, len(self.tabs))
                     self.draw()
-                    return
+                    return True
             # New-tab button (right of the last tab).
             nx = self._new_tab_x()
             if nx <= x < nx + NEW_TAB_W:
                 self.new_tab("about:blank", focus_address=True)
-            return
+                return True
+            return False
         # Toolbar (40..80).
         if 8 <= x < 34 and band_h + 48 <= y < band_h + 72:
             self._back()
-            return
+            return True
         if 40 <= x < 66 and band_h + 48 <= y < band_h + 72:
             self._forward()
-            return
+            return True
         if 72 <= x < 98 and band_h + 48 <= y < band_h + 72:
             self._reload()
-            return
+            return True
         if 104 <= x < 130 and band_h + 48 <= y < band_h + 72:
             self._home()
-            return
+            return True
         # Toe toolbar buttons.
         bx = 136
         for btn in self._toe_buttons():
@@ -3992,18 +4017,18 @@ class Browser:
                 if ctx:
                     ctx.call("on_click", btn.id)
                 self.draw()
-                return
+                return True
             bx += 30
         # Bookmark star (after toe buttons).
         star_x = 136 + self._toe_buttons_offset()
         if star_x <= x < star_x + 26 and band_h + 48 <= y < band_h + 72:
             self._toggle_bookmark()
-            return
+            return True
         # Hamburger settings button (right of the address bar).
         menu_x = self.canvas.winfo_width() - MENU_BTN_W - 8
         if menu_x <= x < menu_x + MENU_BTN_W and band_h + 48 <= y < band_h + 72:
             self._toggle_menu()
-            return
+            return True
         # Address bar.
         if x >= 136 + self._toe_buttons_offset() + 30:
             self.focus = "address"
@@ -4015,6 +4040,8 @@ class Browser:
                 self.address_sel = None
             self._address_ensure_visible()
             self._draw_chrome()
+            return True
+        return False
 
     def _on_motion(self, e):
         if self.select_popup.open_:
