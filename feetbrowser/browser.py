@@ -1397,7 +1397,7 @@ class Tab:
             # results are available immediately and deterministically.
             for key, url in new:
                 try:
-                    _headers, data, ctype = url.request_bytes()
+                    data, ctype = self._image_bytes(url)
                 except Exception:  # noqa: BLE001 - keep placeholder on failure
                     data, ctype = None, None
                 self._decode_and_finish(key, data, ctype)
@@ -1449,7 +1449,7 @@ class Tab:
         if not self._gui_mode():
             for key, _url in queued:
                 try:
-                    _headers, data, ctype = _url.request_bytes()
+                    data, ctype = self._image_bytes(_url)
                 except Exception:  # noqa: BLE001 - keep placeholder on failure
                     data, ctype = None, None
                 self._decode_and_finish(key, data, ctype)
@@ -1489,13 +1489,30 @@ class Tab:
         """
         return bool(self._image_queue)
 
+    def _image_bytes(self, url):
+        """Image bytes, Chrome-impersonated when curl_cffi is available.
+
+        The page fetch already impersonates a Chrome client; images used to
+        go over the raw socket stack instead, and a site whose bot management
+        fingerprints every connection throttles that client's request bursts
+        into hanging (safebooru behind Cloudflare draws placeholders for a
+        page full of thumbnails). Presenting the same fingerprint the page
+        did keeps the ``<img>`` fetches on the served side of the gate, and
+        the raw stack remains the fallback where there is no curl_cffi.
+        """
+        try:
+            _headers, data, ctype = url.request_impersonated_bytes()
+        except Exception:  # noqa: BLE001 - fall through to the raw stack
+            _headers, data, ctype = url.request_bytes()
+        return data, ctype
+
     def _fetch_image(self, key, url):
         """Background thread: fetch bytes, hand them back to the UI thread via
         the results queue. Never touches the canvas directly. The semaphore bounds
         how many image fetches run at once browser-wide."""
         try:
             with _image_fetch_sem:
-                _headers, data, ctype = url.request_bytes()
+                data, ctype = self._image_bytes(url)
         except Exception as e:  # noqa: BLE001 - failed image fetch: keep placeholder
             data, ctype = None, None
             self._image_failures.append(f"{url} ({type(e).__name__})")
