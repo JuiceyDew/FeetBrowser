@@ -1,103 +1,100 @@
 # 🦶 FeetBrowser
 *See the web from a new ankle*
 
-A web browser written **from scratch**. No Chromium, no WebKit, no borrowed
-libraries: it does its own networking, HTML parsing, CSS, layout, JavaScript,
-fonts, and pixels. No GUI toolkit either: the TrueType parser, the antialiased
-rasteriser and the image decoders are all in this repo. The JavaScript engine,
-the DOM bridge and the renderer's inner loops are compiled to a native Rust
-extension; everything else (networking, parsing, layout, the scene graph,
-chrome) is Python, standard library only.
+A web browser written **from scratch** -- no Chromium, no WebKit, no borrowed
+libraries, and no GUI toolkit. It parses its own HTML, styles it with its own
+CSS, runs its own JavaScript, rasterises its own fonts, and draws its own
+pixels. The JavaScript engine, the DOM bridge and the renderer's inner loops
+are a native Rust extension; everything else -- networking, parsing, layout,
+the scene graph, the chrome -- is Python, standard library only.
+
+A browser that walks wherever you do: macOS, Windows, Linux, and headless.
+
+## What it can do
+
+**Browse.** Open tabs and drag them to reorder them; go back, forward and
+reload; keep bookmarks and history; read the page source. Type a URL or a
+search into the address bar. Open links in new tabs with a middle-click or a
+`Ctrl`-click -- and grab the window itself by its top bar and drag it around,
+like a title bar.
+
+**Read.** Fill in forms and submit them (GET and POST), tick checkboxes,
+follow links, and let the browser keep per-tab history for you.
+
+**Watch.** Play `<video>`: Motion JPEG, uncompressed, RLE, and H.264 with I, P
+and B slices -- plus animated GIFs -- and listen along in sync, with AAC-LC,
+uncompressed PCM, or MP3, all decoded through feetplayer's own Fortran.
+([The honest list of gaps.](docs/media.md))
+
+**Extend.** Add extensions ("toes") from the built-in ToeHub, restyle the whole
+browser with **Shoes** themes (`about:shoes`, `Ctrl+Shift+S`), and run it all
+from the hamburger menu. It even tells Discord what you're reading, rich
+presence and all.
+
+Download files while you read: `Ctrl-J` shows the manager, each transfer with
+its bar, its rate, and a resume where the server allows a `Range`.
+
+A fast flick of the wheel keeps the page gliding, so quick scrolling doesn't
+need a notch for every pixel.
+
+### A handful of shortcuts
+
+| Key | Action | Key | Action |
+|-----|--------|-----|--------|
+| `Ctrl-T` | new tab | `Ctrl-W` | close tab |
+| `Ctrl-L` | focus address bar | `Ctrl-R` | reload |
+| `Ctrl-J` | downloads | `Ctrl-H` | history |
+| `Ctrl-Tab` | next tab | `Ctrl-Shift-Tab` | previous tab |
+
+[Everything, in one place.](docs/usage.md)
+
+## Run it
+
+```bash
+./run.sh                              # macOS and Linux: the welcome page
+./run.sh https://example.com          # straight to a page
+./run.sh --screenshot https://example.com page.png   # no window needed
+```
+
+On Windows, `run.cmd` is the same script for `cmd.exe`.
+
+There's no toolkit to install: just Python 3 and a system font. On a first run
+the script does two things for you, into a local `.venv`:
+
+1. **The Rust engine.** `feetbrowser_engine` is compiled there with maturin, so
+   a first run needs the Rust toolchain -- the script installs maturin itself.
+2. **feetplayer.** The media stack, our own code in a repository of its own, is
+   installed from [`requirements.txt`](requirements.txt), pinned to a commit.
+
+Prefer not to install a Rust toolchain at all? Don't: the
+[Wheels](.github/workflows/wheels.yml) workflow ships prebuilt extension wheels
+for macOS (one universal wheel), manylinux x86-64 and Windows x86-64, across
+CPython 3.9-3.14, attached to every tagged release. Install one into your
+interpreter and `run.sh` finds the engine ready and skips the build.
+
+The window is ours too. macOS gets one through AppKit, Windows one through
+user32/gdi32, and Linux gets a **native Wayland window** -- the protocol spoken
+straight over a unix socket, no library in between -- with X11 (including
+XWayland) as the fallback. No display at all? `--screenshot` still renders the
+whole browser, chrome and all, to a PNG. `FEETBROWSER_DISPLAY` picks the
+backend -- or `none`, for headless -- and
+[the full list is one page away](docs/environment.md).
 
 ## STRIDE: how code is judged
 
 Every change should be a **stride forward**: one deliberate step, then iterate.
 Code in this repo is evaluated on six principles:
 
-- **S**imple: KISS + DRY: no repetition, no cognitive load
+- **S**imple: KISS + DRY -- no repetition, no cognitive load
 - **T**rue to spec: correctness against the web specs (HTTP/1.1, HTML tree-building, CSS cascade)
-- **R**eadable: Clean Code + SOLID: modular, explicit, maintainable
-- **I**terative: Agile + DevOps: small steps, continuous feedback, shared ownership
+- **R**eadable: Clean Code + SOLID -- modular, explicit, maintainable
+- **I**terative: Agile + DevOps -- small steps, continuous feedback, shared ownership
 - **D**on't Repeat Yourself: no duplication
-- **E**fficient: Unix + minimalism: one thing well, fewer resources
-
-## Run it
-
-```bash
-./run.sh                 # macOS, Linux: opens the welcome page
-./run.sh https://example.com
-```
-
-```bat
-run.cmd                  :: Windows: the same script for cmd.exe
-run.cmd https://example.com
-```
-
-No GUI toolkit to install: just Python 3 and a system font. Two things do
-get installed into a local `.venv` on a first run, and the scripts do both
-for you: the Rust extension (`feetbrowser_engine`) is compiled there when it
-isn't importable, so a first run needs the Rust toolchain (the script
-installs `maturin` into the venv for you); and
-[feetplayer](https://github.com/67plays/feetplayer) -- the media stack, our
-own code in a repository of its own -- is installed from
-[`requirements.txt`](requirements.txt), which pins it to a commit sha.
-On Windows the first run needs a C++ linker as well,
-which rustup does not bring with it; [usage.md](docs/usage.md) has the one
-download and the one checkbox. Once the extension is built and installed
-for the interpreter you're invoking, `python3 -m feetbrowser <url>` works
-directly.
-
-If you would rather not install a Rust toolchain at all, don't: the
-[Wheels](.github/workflows/wheels.yml) workflow builds the extension for
-macOS (Intel and Apple Silicon in one universal wheel), manylinux x86-64 and
-Windows x86-64, on CPython 3.9 through 3.14. They are attached to every
-tagged release, and every run of that workflow keeps the same files as
-downloadable artifacts. Install one into the interpreter you run the browser
-with (`pip install feetbrowser_engine-*.whl`), and `run.sh` finds the
-engine already importable and skips the build.
-
-The window itself is ours too. macOS gets one through AppKit, Linux one
-through Wayland or X11, and Windows one through user32/gdi32, all by ctypes,
-so there is nothing to install for any of them. On Linux, a native Wayland
-window is used when the session offers one -- it needs no library at all,
-because the Wayland protocol is spoken directly over a unix socket the way
-the browser already speaks HTTP -- and X11, including XWayland, is the
-fallback, so X-only users are unaffected. Anywhere else, and
-anywhere with no display, the browser still renders: `--screenshot` writes
-the page to a PNG without opening anything.
-
-To render a page to a PNG without opening a window:
-
-```bash
-./run.sh --screenshot https://example.com page.png
-```
-
-## What you can do
-
-- Open tabs, back/forward, reload, bookmarks, history, and page source
-- Fill in forms, follow links, search from the address bar
-- Download files, watching them arrive: `Ctrl-J` shows the manager
-- Play a `<video>`, with play/pause and a scrubber: Motion JPEG,
-  uncompressed, RLE, or H.264 with I, P and B slices under either entropy
-  coder -- and, where the soundtrack is AAC-LC or uncompressed PCM, with
-  the sound, in sync
-  ([the honest list](docs/media.md#what-is-not-supported))
-- Add extensions ("toes"): open **`toe://hub`** in the browser
-- Restyle the browser with **Shoes** themes: open **`about:shoes`**
-  (`Ctrl+Shift+S`)
-- Use the hamburger settings menu (right of the address bar) for
-  bookmarks, history, themes, and **Manage Toes** (`toe://hub`), each in
-  a new tab
-- Keyboard shortcuts: `Ctrl-T` new tab, `Ctrl-L` focus address bar,
-  `Ctrl-W` close tab, and more
+- **E**fficient: Unix + minimalism -- one thing well, fewer resources
 
 ## Learn more
 
-- [Usage & shortcuts](docs/usage.md)
-- [Architecture: how the engine works](docs/architecture.md)
-- [The rendering engine: fonts, rasteriser, pixels](docs/rendering.md)
-- [Video: Motion JPEG, H.264 in Fortran, and the gaps](docs/media.md) --
-  and where the decoders now live
-- [Extensions (Toes & ToeHub)](docs/toes.md)
-- [What it does and doesn't do](docs/limitations.md)
-- [Running the tests](docs/testing.md)
+*How it works:* [architecture](docs/architecture.md) · [the rendering engine](docs/rendering.md) · [video and media](docs/media.md)
+*How to use it:* [usage & shortcuts](docs/usage.md) · [environment variables](docs/environment.md)
+*How to extend it:* [toes & ToeHub](docs/toes.md)
+*The honest parts:* [what it does and doesn't do](docs/limitations.md) · [running the tests](docs/testing.md) · [speed goals](docs/speed-goals.md)
