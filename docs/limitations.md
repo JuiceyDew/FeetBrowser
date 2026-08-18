@@ -116,11 +116,12 @@ AV1 or MPEG-4 ASP at all, so every WebM is identified and measured but not
 decoded, and an element carrying one draws a correctly sized box saying
 which codec it is and why it is not playing. YouTube and its neighbours do
 not work, for want of streaming rather than for want of a codec. **Sound is
-AAC-LC and uncompressed PCM**: an AAC-LC track in MP4 or MOV plays, through
-our own decoder and our own output device, and so does PCM in MP4/MOV, AVI
-and `.wav`, with the pictures scheduled against it rather than against the
-wall clock. Every other soundtrack is identified by name and plays silently
--- there is no MP3, Vorbis, Opus, ADPCM, mu-law or A-law decoder. There is
+AAC-LC, uncompressed PCM, or MP3 (MPEG Layer III)**: an AAC-LC track in MP4
+or MOV plays, through our own decoder and our own output device, and so does
+PCM in MP4/MOV, AVI and `.wav`, and a bare `.mp3` stream, with the pictures
+scheduled against it rather than against the wall clock. Every other
+soundtrack is identified by name and plays silently -- there is no Vorbis,
+Opus, ADPCM, mu-law or A-law decoder. There is
 also no `<audio>` element, so sound only arrives beside a picture. The
 design, the exact unsupported list and the ordered next steps are in
 [media.md](media.md).
